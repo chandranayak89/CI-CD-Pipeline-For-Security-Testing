@@ -1,0 +1,178 @@
+### Security Telemetry Configuration ###
+# Version: 1.0.0
+# Last Updated: 2023-08-15
+
+# Global Settings
+settings:
+  enabled: true
+  log_level: "info"
+  buffer_size: 1000  # Max events to buffer before forced flush
+  batch_interval: 60  # Seconds between batch sends
+  retention_days: 90  # How long to keep telemetry data
+
+# Telemetry Providers
+providers:
+  elasticsearch:
+    enabled: true
+    url: "${ELASTICSEARCH_URL:-http://elasticsearch:9200}"
+    username: "${ELASTICSEARCH_USERNAME:-elastic}"
+    password: "${ELASTICSEARCH_PASSWORD}"
+    index_prefix: "security-pipeline"
+    ssl_verify: true
+    mappings:
+      security_scan: "security-scans"
+      security_gate: "security-gates"
+      deployment: "deployments"
+      compliance: "compliance-checks"
+  
+  prometheus:
+    enabled: true
+    push_gateway: "${PROMETHEUS_GATEWAY:-http://prometheus-pushgateway:9091}"
+    job_prefix: "security-pipeline"
+    metrics:
+      - name: "security_gate_status"
+        type: "gauge"
+        help: "Status of security gates (0=failed, 1=passed)"
+        labels: ["environment", "gate_type"]
+      - name: "security_findings_count"
+        type: "gauge"
+        help: "Count of security findings by severity"
+        labels: ["tool", "severity"]
+      - name: "security_scan_duration"
+        type: "gauge"
+        help: "Duration of security scans in seconds"
+        labels: ["scan_type"]
+      - name: "deployment_success_rate"
+        type: "gauge"
+        help: "Success rate of deployments after security gates"
+        labels: ["environment"]
+  
+  grafana:
+    enabled: true
+    url: "${GRAFANA_URL:-http://grafana:3000}"
+    api_key: "${GRAFANA_API_KEY}"
+    dashboard_folder: "Security Pipeline"
+    organization_id: 1
+    datasources:
+      prometheus:
+        name: "Prometheus"
+        type: "prometheus"
+        url: "${PROMETHEUS_URL:-http://prometheus:9090}"
+      elasticsearch:
+        name: "Elasticsearch"
+        type: "elasticsearch"
+        url: "${ELASTICSEARCH_URL:-http://elasticsearch:9200}"
+        index_pattern: "security-pipeline-*"
+  
+  slack:
+    enabled: true
+    webhook_url: "${SLACK_WEBHOOK_URL}"
+    channel: "#security-alerts"
+    notify_on:
+      gate_failure: true
+      critical_vulnerability: true
+      deployment_failure: true
+      compliance_failure: true
+
+# Event Types to Collect
+collect:
+  security_scans:
+    enabled: true
+    tools:
+      - name: "SAST"
+        sources: ["bandit", "semgrep"]
+      - name: "DAST"
+        sources: ["zap"]
+      - name: "Container"
+        sources: ["trivy"]
+      - name: "Dependencies"
+        sources: ["safety", "pip-audit"]
+      - name: "Secrets"
+        sources: ["trufflehog"]
+  
+  security_gates:
+    enabled: true
+    events:
+      - "gate_evaluation_start"
+      - "gate_evaluation_result"
+      - "gate_override"
+  
+  deployments:
+    enabled: true
+    events:
+      - "deployment_start"
+      - "deployment_success"
+      - "deployment_failure"
+      - "deployment_rollback"
+  
+  compliance:
+    enabled: true
+    frameworks:
+      - "PCI-DSS"
+      - "HIPAA"
+      - "NIST-800-53"
+      - "OWASP-Top-10"
+
+# Dashboards to Create
+dashboards:
+  security_overview:
+    title: "Security Pipeline Overview"
+    refresh: "1m"
+    panels:
+      - title: "Security Gate Status by Environment"
+        type: "status-panel"
+        datasource: "Prometheus"
+      - title: "Critical Vulnerabilities Over Time"
+        type: "graph"
+        datasource: "Elasticsearch"
+      - title: "Recent Gate Failures"
+        type: "table"
+        datasource: "Elasticsearch"
+  
+  vulnerability_metrics:
+    title: "Vulnerability Metrics"
+    refresh: "5m"
+    panels:
+      - title: "Vulnerabilities by Severity"
+        type: "bar-chart"
+        datasource: "Prometheus"
+      - title: "Top 10 Vulnerable Dependencies"
+        type: "table"
+        datasource: "Elasticsearch"
+      - title: "Vulnerability Trend by Category"
+        type: "line-chart"
+        datasource: "Elasticsearch"
+
+  deployment_security:
+    title: "Deployment Security Metrics"
+    refresh: "5m"
+    panels:
+      - title: "Deployment Success Rate After Gates"
+        type: "gauge"
+        datasource: "Prometheus"
+      - title: "Deployment Security Score Trend"
+        type: "graph"
+        datasource: "Elasticsearch"
+      - title: "Failed Gates per Deployment"
+        type: "heatmap"
+        datasource: "Elasticsearch"
+
+# Alerting Rules
+alerts:
+  gate_failure:
+    enabled: true
+    description: "Security gate failure detected"
+    severity: "high"
+    channels: ["slack", "email"]
+  
+  new_critical_vulnerability:
+    enabled: true
+    description: "New critical vulnerability detected"
+    severity: "critical"
+    channels: ["slack", "email", "pagerduty"]
+  
+  compliance_drift:
+    enabled: true
+    description: "Compliance status degradation detected"
+    severity: "medium"
+    channels: ["slack"] 

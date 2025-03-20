@@ -1,0 +1,87 @@
+name: Dynamic Application Security Testing (DAST)
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * 1'  # Run weekly on Mondays at midnight
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  dast-scan:
+    name: OWASP ZAP DAST Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      # Start the application in the background
+      - name: Start application server
+        run: |
+          cd ${{ github.workspace }}
+          # Create necessary directories for the web dashboard
+          mkdir -p src/static src/templates src/logs
+          # Start the application in the background
+          nohup python -m src.main --dashboard &
+          # Wait for the server to start
+          sleep 10
+          echo "Application server started on port 8080"
+      
+      # Run ZAP Baseline Scan (quick scan)
+      - name: ZAP Baseline Scan
+        uses: zaproxy/action-baseline@v0.9.0
+        with:
+          target: 'http://localhost:8080'
+          allow_issue_writing: true
+          cmd_options: '-a -j'  # Auto-select config options, output as JSON
+          # Customize rules if needed
+          rules_file_name: '.zap/rules.tsv'
+          fail_action: false
+      
+      # Run ZAP Full Scan (comprehensive scan)
+      - name: ZAP Full Scan
+        uses: zaproxy/action-full-scan@v0.7.0
+        with:
+          target: 'http://localhost:8080'
+          allow_issue_writing: true
+          cmd_options: '-a -j'
+          # Rules file to customize behavior
+          rules_file_name: '.zap/rules.tsv'
+          fail_action: false
+      
+      - name: Archive ZAP scan results
+        uses: actions/upload-artifact@v3
+        with:
+          name: zap-scan-results
+          path: |
+            zap-baseline-scan.json
+            zap-full-scan.json
+      
+      # Generate a human-readable report
+      - name: Generate HTML Report
+        run: |
+          mkdir -p dast-reports
+          python scripts/generate_dast_report.py --baseline zap-baseline-scan.json --fullscan zap-full-scan.json --output dast-reports/index.html
+        continue-on-error: true
+      
+      # Deploy the report to GitHub Pages
+      - name: Deploy DAST Report to GitHub Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: dast-reports
+          branch: gh-pages
+          target-folder: dast-reports 

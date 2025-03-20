@@ -1,0 +1,59 @@
+# OWASP ZAP rules configuration
+# Format: <rule-id><tab><rule-name><tab><threshold><tab><status>
+# Thresholds: OFF, IGNORE, INFO, WARN, FAIL
+# Status: IGNORE, WARN, FAIL
+10010	Cookie No HttpOnly Flag	WARN	WARN
+10011	Cookie Without Secure Flag	WARN	WARN
+10015	Incomplete or No Cache-control Header Set	INFO	IGNORE
+10016	Web Browser XSS Protection Not Enabled	WARN	WARN
+10017	Cross-Domain JavaScript Source File Inclusion	WARN	WARN
+10019	Content-Type Header Missing	WARN	WARN
+10020	X-Frame-Options Header	WARN	WARN
+10021	X-Content-Type-Options Header Missing	WARN	WARN
+10023	Information Disclosure - Debug Error Messages	WARN	WARN
+10024	Information Disclosure - Sensitive Information in URL	WARN	WARN
+10025	Information Disclosure - Sensitive Information in HTTP Referrer Header	WARN	WARN
+10026	HTTP Parameter Override	WARN	WARN
+10027	Information Disclosure - Suspicious Comments	INFO	IGNORE
+10032	Viewstate	INFO	IGNORE
+10040	Secure Pages Include Mixed Content	WARN	WARN
+10054	Cookie Without SameSite Attribute	WARN	WARN
+10055	CSP	INFO	IGNORE
+10095	Backup File Disclosure	WARN	WARN
+10096	Timestamp Disclosure	INFO	IGNORE
+10098	Cross-Domain Misconfiguration	WARN	WARN
+10105	Weak Authentication Method	WARN	WARN
+10202	Absence of Anti-CSRF Tokens	WARN	WARN
+20012	Anti-CSRF Tokens Check	WARN	WARN
+20014	HTTP Parameter Pollution	WARN	WARN
+20015	Heartbleed OpenSSL Vulnerability	FAIL	FAIL
+20016	Cross-Domain Requests Permitted	INFO	IGNORE
+20017	Source Code Disclosure - CVE-2012-1823	WARN	WARN
+20018	Remote Code Execution - CVE-2012-1823	WARN	WARN
+20019	Remote Code Execution - Shell Shock	WARN	WARN
+30001	Buffer Overflow	WARN	WARN
+30002	Format String Error	WARN	WARN
+30003	Integer Overflow Error	WARN	WARN
+40003	CRLF Injection	WARN	WARN
+40008	Parameter Tampering	WARN	WARN
+40009	Server Side Include	WARN	WARN
+40012	Cross Site Scripting (Reflected)	WARN	WARN
+40014	Cross Site Scripting (Persistent)	WARN	WARN
+40016	Cross Site Scripting (Persistent) - Prime	WARN	WARN
+40017	Cross Site Scripting (Persistent) - Spider	WARN	WARN
+40018	SQL Injection	WARN	WARN
+40019	SQL Injection - MySQL	WARN	WARN
+40020	SQL Injection - Hypersonic SQL	WARN	WARN
+40021	SQL Injection - Oracle	WARN	WARN
+40022	SQL Injection - PostgreSQL	WARN	WARN
+40023	Possible Username Enumeration	INFO	IGNORE
+40024	SQL Injection - SQLite	WARN	WARN
+40025	Proxy Disclosure	WARN	WARN
+40026	Cross Site Scripting (DOM Based)	WARN	WARN
+40027	SQL Injection - MsSQL	WARN	WARN
+40028	ELMAH Information Leak	WARN	WARN
+90001	Insecure JSF ViewState	WARN	WARN
+90002	Java Serialized Object	WARN	WARN
+90003	Sub Resource Integrity Attribute Missing	WARN	WARN
+90022	Application Error Disclosure	WARN	WARN
+90033	Loosely Scoped Cookie	INFO	IGNORE 

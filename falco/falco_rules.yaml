@@ -1,0 +1,166 @@
+# Custom Falco Rules for Security Testing Pipeline
+# These rules detect suspicious activities in containers
+
+# List of binaries that shouldn't be run inside the security-app container
+- list: security_app_prohibited_binaries
+  items: [cc, gcc, g++, make, clang, cmake, curl, wget, nc, netcat, ncat, ssh, scp, sftp, ftp, python2, python3.6, python3.7, python3.8]
+
+# List of networking utilities we don't expect to be run in our container
+- list: security_app_networking_binaries
+  items: [nc, netcat, nmap, tcpdump, ping, telnet, ssh, nslookup, dig, curl, wget]
+
+# List of sensitive directories in our application
+- list: security_app_sensitive_mount_paths
+  items: [/app/src, /app/logs]
+
+# List of sensitive environment variables that should be monitored
+- list: security_app_sensitive_env_vars
+  items: [API_KEY, SECRET_KEY, PASSWORD, TOKEN, CREDENTIAL, AUTH]
+
+# Detect Package Management Use in Our Container
+# (We use fixed base images and don't expect package managers to run in production)
+- rule: Package Management Detected in Security App
+  desc: Package management commands executed in our security app container
+  condition: >
+    container.id != host and
+    container.name contains "security-app" and
+    proc.name in (apt, apt-get, aptitude, dnf, yum, npm, pip, pip3, gem, cargo)
+  output: >
+    Package management command run in security-app container 
+    (user=%user.name user_loginuid=%user.loginuid command=%proc.cmdline container_id=%container.id)
+  priority: WARNING
+  tags: [container, process]
+
+# Detect Outbound Network Connection from Container to Suspicious Destinations
+- rule: Unexpected Outbound Connection from Security App
+  desc: Detect outbound network activity to unexpected destinations
+  condition: >
+    container.id != host and
+    container.name contains "security-app" and
+    outbound and 
+    not (fd.name startswith "127.0.0." or fd.name startswith "10.") and
+    not fd.name in (k8s_monitored_endpoints)
+  output: >
+    Outbound connection from security-app container to external network 
+    (user=%user.name destination=%fd.name command=%proc.cmdline container_id=%container.id)
+  priority: WARNING
+  tags: [container, network]
+
+# Detect Sensitive File Access
+- rule: Sensitive File Access in Security App
+  desc: Detect someone accessing sensitive files in our app container
+  condition: >
+    container.id != host and
+    container.name contains "security-app" and
+    (fd.directory contains "/etc/passwd" or
+     fd.directory contains "/etc/shadow" or
+     fd.directory contains "id_rsa" or
+     fd.directory contains ".aws" or
+     fd.directory contains ".kube" or
+     fd.directory contains ".ssh")
+  output: >
+    Sensitive file accessed in security-app container 
+    (user=%user.name file=%fd.name command=%proc.cmdline container_id=%container.id)
+  priority: WARNING
+  tags: [container, filesystem]
+
+# Detect Shell Execution Inside Container
+- rule: Interactive Shell Launched in Security App
+  desc: An interactive shell was spawned in our security app container
+  condition: >
+    container.id != host and
+    container.name contains "security-app" and
+    proc.name in (bash, sh, zsh, ksh, fish) and
+    proc.tty != 0
+  output: >
+    Interactive shell launched in security-app container 
+    (user=%user.name shell=%proc.name parent=%proc.pname cmdline=%proc.cmdline container_id=%container.id)
+  priority: WARNING
+  tags: [container, process]
+
+# Detect Forbidden Networking Tools
+- rule: Networking Tool Executed in Security App
+  desc: A networking diagnostic/attack tool was executed in our security app container
+  condition: >
+    container.id != host and
+    container.name contains "security-app" and
+    proc.name in (security_app_networking_binaries)
+  output: >
+    Networking tool executed in security-app container 
+    (user=%user.name tool=%proc.cmdline container_id=%container.id)
+  priority: WARNING
+  tags: [container, network, process]
+
+# Detect Changes to Container Immutable Files
+- rule: Container Immutable Files Modified in Security App
+  desc: Detect modifications to files that should be immutable in our security app
+  condition: >
+    container.id != host and
+    container.name contains "security-app" and
+    (open_write or unlink or rename) and
+    (fd.name startswith "/app/src" or
+     fd.name startswith "/app/requirements.txt" or 
+     fd.name startswith "/usr/local/bin")
+  output: >
+    Immutable file modified in security-app container 
+    (user=%user.name command=%proc.cmdline file=%fd.name container_id=%container.id)
+  priority: WARNING
+  tags: [container, filesystem]
+
+# Detect Process Running as Root Inside Container
+- rule: Process Running as Root in Security App
+  desc: A process was started with the root user in our security app container
+  condition: >
+    container.id != host and
+    container.name contains "security-app" and
+    user.name = "root"
+  output: >
+    Process running as root in security-app container 
+    (user=%user.name command=%proc.cmdline container_id=%container.id)
+  priority: WARNING
+  tags: [container, process]
+
+# Detect Unexpected Child Process
+- rule: Unexpected Child Process in Security App
+  desc: Unexpected child process spawned in security app container
+  condition: >
+    container.id != host and
+    container.name contains "security-app" and
+    proc.pname in (python, python3) and
+    not proc.name in (python, python3, gunicorn) and
+    proc.name in (security_app_prohibited_binaries)
+  output: >
+    Unexpected child process spawned in security-app container 
+    (user=%user.name parent=%proc.pname command=%proc.cmdline container_id=%container.id)
+  priority: WARNING
+  tags: [container, process]
+
+# Detect Container Escape Attempts
+- rule: Container Escape Attempt
+  desc: Potential container escape attempt detected
+  condition: >
+    container.id != host and
+    (fd.name startswith "/proc" or
+     fd.name startswith "/sys" or
+     fd.name startswith "/var/run/docker.sock" or
+     fd.name startswith "/var/lib/kubelet") and
+    not fd.name startswith "/proc/self" and
+    not fd.name startswith "/proc/stat"
+  output: >
+    Potential container escape attempt 
+    (user=%user.name command=%proc.cmdline file=%fd.name container_id=%container.id image=%container.image)
+  priority: CRITICAL
+  tags: [container, host]
+
+# Detect Crypto Mining Activities
+- rule: Crypto Mining Activity
+  desc: Cryptocurrency mining activity detected in container
+  condition: >
+    container.id != host and
+    (proc.name in (cryptominer, minerd, minergate, cpuminer, coinhive) or
+     (evt.type = execve and evt.arg.path contains "xmr" or evt.arg.path contains "miner"))
+  output: >
+    Crypto mining activity detected 
+    (user=%user.name command=%proc.cmdline container_id=%container.id image=%container.image)
+  priority: CRITICAL
+  tags: [container, process] 

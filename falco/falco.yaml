@@ -1,0 +1,71 @@
+# Falco Configuration for Security Testing Pipeline
+
+# The location of the rules file(s)
+rules_file:
+  - /etc/falco/falco_rules.yaml
+  - /etc/falco/falco_rules.local.yaml
+
+# Whether to output events in JSON format
+json_output: true
+
+# Where to send the output
+stdout_output:
+  enabled: true
+
+file_output:
+  enabled: true
+  keep_alive: false
+  filename: /var/log/falco/falco.log
+
+# Specify if output to any of the output channels should be buffered
+buffered_outputs: false
+
+# Number of seconds (decimal allowed) to pause before closing when
+# the end of the input is reached
+# Useful when reading from STDIN to allow the consumer to start
+# the program (e.g. exporting to Slack) before data starts flowing
+exit_status: 0
+
+# The HTTP/WebSocket/gRPC output section
+program_output:
+  enabled: true
+  keep_alive: false
+  program: "jq '{text: .output}' | curl -d @- -X POST https://hooks.slack.com/services/your/slack/webhook || true"
+
+# Falco supports sending its events to a message broker like a
+# RabbitMQ instance for further distribution.
+# rabbitmq:
+#   enabled: false
+#   url: amqp://user:pass@hostname:port/vhost
+
+# Log level (panic, error, warning, info, debug)
+log_level: info
+
+# Enable Event Filtering - Only outputs security events with priority > threshold
+priority: warning
+
+# List of containers that falco should ignore
+# skipped_containers:
+#   - name: google_containers/pause-amd64
+#   - name: docker/ucp-agent
+
+# Syscall event source
+syscall_event_drops:
+  actions:
+    - log
+    - alert
+  rate: .3
+  max_burst: 1
+
+# Labels attached to each Falco event
+# These can be used to filter and group events
+labels:
+  env: production
+  app: security-testing-pipeline
+
+# Define the container monitoring parameters
+container_monitor:
+  detect_privileged_containers: true
+  detect_unsecured_ports: true
+  detect_host_mount_points: true
+  detect_sensitive_env_vars: true 

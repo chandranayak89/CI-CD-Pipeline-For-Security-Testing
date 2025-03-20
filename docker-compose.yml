@@ -1,0 +1,78 @@
+version: '3.8'
+
+services:
+  security-app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: security-testing-pipeline:latest
+    container_name: security-app
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./src:/app/src
+      - ./logs:/app/logs
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    # Security labels for Falco monitoring
+    labels:
+      - "com.security.app=true"
+      - "com.security.level=high"
+
+  # Optional: Add a database service if needed
+  # db:
+  #   image: postgres:14-alpine
+  #   container_name: security-db
+  #   environment:
+  #     POSTGRES_USER: appuser
+  #     POSTGRES_PASSWORD: securepassword
+  #     POSTGRES_DB: security
+  #   volumes:
+  #     - security-db-data:/var/lib/postgresql/data
+  #   restart: unless-stopped
+
+  # Optional: Add a scan service for local security testing
+  security-scan:
+    image: aquasec/trivy:latest
+    container_name: security-scan
+    depends_on:
+      - security-app
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./reports:/reports
+    command: >
+      image --format template --template "@/reports/html.tpl" 
+      -o /reports/container-scan-report.html 
+      security-testing-pipeline:latest
+  
+  # Falco for runtime container security monitoring
+  falco:
+    image: falcosecurity/falco:latest
+    container_name: falco-security
+    privileged: true
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /var/lib/docker:/var/lib/docker:ro
+      - /proc:/host/proc:ro
+      - /dev:/host/dev:ro
+      - /etc:/host/etc:ro
+      - ./falco/falco.yaml:/etc/falco/falco.yaml
+      - ./falco/falco_rules.yaml:/etc/falco/falco_rules.local.yaml
+      - ./falco/logs:/var/log/falco
+    environment:
+      - FALCO_BPF_PROBE=
+    # Stream logs to the host
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "200m"
+        max-file: "10"
+
+# volumes:
+#   security-db-data: 

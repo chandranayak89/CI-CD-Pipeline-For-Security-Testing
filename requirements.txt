@@ -21,4 +21,10 @@ termcolor>=1.1.0
 # Testing tools
 pytest>=7.0.0
 pytest-cov>=2.12.1
-pylint>=2.13.0 
+pylint>=2.13.0
+
+# Runtime Security Monitoring
+watchdog>=2.1.9
+docker>=6.0.1
+python-slugify>=8.0.0
+slackclient>=2.9.4 

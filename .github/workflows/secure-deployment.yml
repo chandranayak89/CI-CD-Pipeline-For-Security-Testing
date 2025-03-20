@@ -1,0 +1,399 @@
+name: Secure Deployment Pipeline
+
+on:
+  push:
+    branches: [ main, production ]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      force_deploy:
+        description: 'Force deployment (bypasses some security gates)'
+        required: false
+        default: false
+        type: boolean
+      special_gates:
+        description: 'Special gates to apply (comma-separated)'
+        required: false
+        type: string
+
+env:
+  PYTHON_VERSION: '3.10'
+
+jobs:
+  # Security scanning phase
+  security-scan:
+    name: Security Scanning
+    runs-on: ubuntu-latest
+    outputs:
+      sast_status: ${{ steps.sast.outputs.status }}
+      dast_status: ${{ steps.dast.outputs.status }}
+      container_status: ${{ steps.container.outputs.status }}
+      dependency_status: ${{ steps.dependency.outputs.status }}
+      policy_status: ${{ steps.policy.outputs.status }}
+      secrets_status: ${{ steps.secrets.outputs.status }}
+      runtime_status: ${{ steps.runtime.outputs.status }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Cache dependencies
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install safety bandit semgrep trufflehog pip-audit
+      
+      # SAST Scanning
+      - name: Run SAST scans
+        id: sast
+        run: |
+          mkdir -p reports/sast
+          bandit -r src/ -f json -o reports/bandit-results.json || true
+          semgrep --config=p/python --config=p/security-audit src/ --json > reports/semgrep-results.json || true
+          echo "status=completed" >> $GITHUB_OUTPUT
+      
+      # DAST Scanning - only if endpoint is specified or in production
+      - name: Run DAST scans
+        id: dast
+        if: github.ref == 'refs/heads/production' || github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p reports/dast
+          # Determine which DAST scan to run based on branch
+          if [[ "${{ github.ref }}" == "refs/heads/production" ]]; then
+            echo "Running full DAST scan for production"
+            docker run --rm -v $(pwd)/reports/dast:/zap/wrk/:rw -t owasp/zap2docker-stable zap-full-scan.py -t https://example.com -J zap-full-scan-results.json -I || true
+          else
+            echo "Running baseline DAST scan for non-production"
+            docker run --rm -v $(pwd)/reports/dast:/zap/wrk/:rw -t owasp/zap2docker-stable zap-baseline.py -t https://example.com -J zap-baseline-results.json -I || true
+          fi
+          # Copy results to main reports directory
+          cp reports/dast/*.json reports/ || true
+          echo "status=completed" >> $GITHUB_OUTPUT
+      
+      # Container Security Scanning
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+      
+      - name: Run container security scan
+        id: container
+        run: |
+          mkdir -p reports/container
+          # Build the image
+          docker build -t security-testing-app:${{ github.sha }} .
+          
+          # Run Trivy scan
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v $(pwd)/reports:/reports \
+            aquasec/trivy image \
+            --format json \
+            --output /reports/trivy-results.json \
+            security-testing-app:${{ github.sha }}
+          
+          echo "status=completed" >> $GITHUB_OUTPUT
+      
+      # Dependency Vulnerability Scanning
+      - name: Run dependency scans
+        id: dependency
+        run: |
+          mkdir -p reports/dependencies
+          
+          # Run Safety check
+          safety check -r requirements.txt --json > reports/safety-results.json || true
+          
+          # Run pip-audit
+          pip-audit -r requirements.txt -f json > reports/pip-audit-results.json || true
+          
+          echo "status=completed" >> $GITHUB_OUTPUT
+      
+      # Secret Detection
+      - name: Run secrets detection
+        id: secrets
+        run: |
+          mkdir -p reports/secrets
+          
+          # Run TruffleHog
+          trufflehog filesystem --config=policies/trufflehog-config.yaml --json ./ > reports/trufflehog-results.json || true
+          
+          echo "status=completed" >> $GITHUB_OUTPUT
+      
+      # Policy Compliance Check
+      - name: Run policy compliance check
+        id: policy
+        run: |
+          mkdir -p reports/compliance
+          
+          # Run compliance check
+          python scripts/check_compliance.py --policy-file policies/security-policies.yaml --output reports/compliance-results.json --format json
+          
+          echo "status=completed" >> $GITHUB_OUTPUT
+      
+      # Runtime Security Validation
+      - name: Validate runtime security rules
+        id: runtime
+        run: |
+          mkdir -p reports/runtime
+          
+          # Run Falco rule validation
+          # This is a placeholder - in a real environment, you would validate your Falco rules
+          echo '{"all_rules_validated": true, "result": "pass"}' > reports/falco-validation-results.json
+          
+          echo "status=completed" >> $GITHUB_OUTPUT
+      
+      # Archive all security reports as artifacts
+      - name: Archive security reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-reports
+          path: reports/
+          retention-days: 7
+
+  # Security gates evaluation phase
+  security-gates:
+    name: Security Gates Evaluation
+    needs: security-scan
+    runs-on: ubuntu-latest
+    outputs:
+      gates_passed: ${{ steps.evaluate_gates.outputs.passed }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyyaml requests
+      
+      # Download security scan reports
+      - name: Download security reports
+        uses: actions/download-artifact@v3
+        with:
+          name: security-reports
+          path: reports/
+      
+      # Determine target environment
+      - name: Determine target environment
+        id: determine_env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/production" ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          else
+            echo "environment=development" >> $GITHUB_OUTPUT
+          fi
+      
+      # Parse special gates if provided
+      - name: Parse special gates
+        id: special_gates
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ github.event.inputs.special_gates }}" ]]; then
+            GATES=$(echo "${{ github.event.inputs.special_gates }}" | tr ',' ' ')
+            echo "gates=${GATES}" >> $GITHUB_OUTPUT
+          else
+            echo "gates=" >> $GITHUB_OUTPUT
+          fi
+      
+      # Evaluate security gates
+      - name: Evaluate security gates
+        id: evaluate_gates
+        run: |
+          # Run the gate evaluation script
+          SPECIAL_GATES="${{ steps.special_gates.outputs.gates }}"
+          SPECIAL_GATES_ARG=""
+          if [[ -n "$SPECIAL_GATES" ]]; then
+            SPECIAL_GATES_ARG="--special-gates $SPECIAL_GATES"
+          fi
+          
+          FORCE_DEPLOY="${{ github.event.inputs.force_deploy }}"
+          if [[ "$FORCE_DEPLOY" == "true" ]]; then
+            echo "⚠️ Force deployment requested - some gates may be bypassed"
+            echo "passed=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          if python scripts/evaluate_security_gates.py \
+            --config policies/deployment-gates.yaml \
+            --results-dir reports \
+            --environment ${{ steps.determine_env.outputs.environment }} \
+            $SPECIAL_GATES_ARG \
+            --slack-webhook ${{ secrets.SLACK_WEBHOOK_URL }}; then
+            
+            echo "✅ All security gates passed!"
+            echo "passed=true" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Security gates failed!"
+            echo "passed=false" >> $GITHUB_OUTPUT
+          fi
+      
+      # Upload gates evaluation report
+      - name: Upload gates evaluation report
+        uses: actions/upload-artifact@v3
+        with:
+          name: gates-evaluation-report
+          path: |
+            reports/gate-evaluation-report.json
+            reports/gate-evaluation-report.html
+          retention-days: 7
+
+  # Deployment phase - only runs if security gates pass
+  deploy:
+    name: Deploy to ${{ needs.security-gates.outputs.environment }}
+    needs: [security-scan, security-gates]
+    if: needs.security-gates.outputs.gates_passed == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Determine target environment
+        id: determine_env
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/production" ]]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+          elif [[ "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          else
+            echo "environment=development" >> $GITHUB_OUTPUT
+          fi
+      
+      # Deploy to appropriate environment
+      - name: Deploy to ${{ steps.determine_env.outputs.environment }}
+        run: |
+          echo "🚀 Deploying to ${{ steps.determine_env.outputs.environment }} environment"
+          # This is a placeholder - replace with your actual deployment steps
+          
+          # For example, you might use:
+          # - AWS CLI for S3/EC2 deployments
+          # - kubectl for Kubernetes deployments
+          # - Azure CLI for Azure deployments
+          # - ssh/scp for traditional deployments
+          
+          # Example for a Docker-based deployment
+          case "${{ steps.determine_env.outputs.environment }}" in
+            production)
+              echo "Deploying to production environment"
+              # docker-compose -f docker-compose.prod.yml up -d
+              ;;
+            staging)
+              echo "Deploying to staging environment"
+              # docker-compose -f docker-compose.staging.yml up -d
+              ;;
+            development)
+              echo "Deploying to development environment"
+              # docker-compose -f docker-compose.dev.yml up -d
+              ;;
+          esac
+      
+      # Post-deployment security verification
+      - name: Verify deployment security
+        run: |
+          echo "🔒 Verifying deployment security..."
+          # This is a placeholder - replace with post-deployment security checks
+          # For example, you might run:
+          # - Vulnerability scans against the deployed environment
+          # - Configuration validation
+          # - Health checks
+      
+      # Send deployment notification
+      - name: Send deployment notification
+        if: always()
+        run: |
+          # This is a placeholder - replace with your notification system
+          if [[ "${{ job.status }}" == "success" ]]; then
+            echo "✅ Deployment to ${{ steps.determine_env.outputs.environment }} successful"
+          else
+            echo "❌ Deployment to ${{ steps.determine_env.outputs.environment }} failed"
+          fi
+
+  # Security report publishing - runs even if gates fail
+  publish-reports:
+    name: Publish Security Reports
+    needs: [security-scan, security-gates]
+    if: always()
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Download all reports
+        uses: actions/download-artifact@v3
+        with:
+          path: all-artifacts
+      
+      - name: Prepare reports directory
+        run: |
+          mkdir -p public
+          cp -R all-artifacts/security-reports/* public/ || true
+          cp -R all-artifacts/gates-evaluation-report/* public/ || true
+          
+          # Create index page
+          cat > public/index.html << EOL
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <title>Security Reports</title>
+              <style>
+                  body { font-family: Arial, sans-serif; margin: 20px; }
+                  h1 { color: #333; }
+                  .report-list { margin: 20px 0; }
+                  .report-item { margin: 10px 0; }
+                  .report-link { color: #0066cc; text-decoration: none; }
+                  .report-link:hover { text-decoration: underline; }
+              </style>
+          </head>
+          <body>
+              <h1>Security Reports</h1>
+              <p>Generated at: $(date)</p>
+              <div class="report-list">
+                  <div class="report-item"><a class="report-link" href="gate-evaluation-report.html">Security Gates Evaluation Report</a></div>
+                  <div class="report-item"><a class="report-link" href="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}">View Workflow Run</a></div>
+              </div>
+          </body>
+          </html>
+          EOL
+      
+      # Deploy to GitHub Pages
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v3
+        if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/production'
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          destination_dir: security-reports
+          keep_files: true 

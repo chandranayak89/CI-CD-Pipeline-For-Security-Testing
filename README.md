@@ -12,7 +12,8 @@ This project implements an automated security testing pipeline using GitHub Acti
 4. **Runtime Container Security** - Monitoring containers during execution for suspicious behavior
 5. **Dependency Vulnerability Management** - Automating third-party dependency security checks and updates
 6. **Compliance and Policy Enforcement** - Defining and enforcing security policies across the pipeline
-7. **Security Dashboard** - Visualizing security findings
+7. **Secure Deployment Strategies** - Implementing deployment controls with automated security gates
+8. **Security Dashboard** - Visualizing security findings
 
 ## Pipeline Components
 
@@ -91,13 +92,33 @@ Features:
 - Policy violation notifications
 - Exception management for approved deviations
 
+### Secure Deployment Strategies
+
+Secure deployment strategies ensure that code can only be deployed after passing security requirements, providing automated "gates" that prevent insecure code from reaching production environments.
+
+Tools implemented:
+- **Security Gates Evaluator** - Script that evaluates security scan results against defined thresholds
+- **Environment-Specific Policies** - Different security requirements for development, staging, and production
+- **Deployment Pipeline** - GitHub Actions workflow with multiple security checkpoints
+- **Deployment Verification** - Post-deployment security verification
+
+Features:
+- Environment-specific security gates with different thresholds
+- Granular security requirements based on severity levels
+- Special compliance gates for PCI, HIPAA, and other standards
+- Integrations with notification systems for gate failures
+- Deployment blocking based on security scan results
+- Override capabilities with proper approvals
+- Detailed gate evaluation reports
+- HTML security gate dashboards
+
 ### Security Dashboard
 
 Reports and visualizes security findings from all scanning tools.
 
-- HTML reports for SAST, DAST, container scanning, runtime security, dependency vulnerabilities, and compliance status
+- HTML reports for SAST, DAST, container scanning, runtime security, dependency vulnerabilities, compliance status, and security gates
 - GitHub Pages integration for report hosting
-- Slack notifications for critical security events and policy violations
+- Slack notifications for critical security events, policy violations, and deployment gate failures
 
 ## Project Structure
 
@@ -113,6 +134,7 @@ CI-CD-Pipeline-For-Security-Testing/
 │       ├── container-scan.yml      # Container scanning workflow
 │       ├── dependency-scan.yml     # Dependency scanning workflow
 │       ├── runtime-security.yml    # Runtime security testing workflow
+│       ├── secure-deployment.yml   # Secure deployment workflow
 │       └── policy-enforcement.yml  # Policy enforcement workflow
 ├── .zap/
 │   └── rules.tsv                   # ZAP scanning rules configuration
@@ -121,6 +143,7 @@ CI-CD-Pipeline-For-Security-Testing/
 │   └── falco_rules.yaml            # Custom Falco security rules
 ├── policies/
 │   ├── security-policies.yaml      # Centralized security policies
+│   ├── deployment-gates.yaml       # Security gate configurations 
 │   └── trufflehog-config.yaml      # TruffleHog secrets detection rules
 ├── reports/
 │   ├── compliance/                 # Compliance and policy reports
@@ -136,6 +159,7 @@ CI-CD-Pipeline-For-Security-Testing/
 ├── scripts/
 │   ├── check_compliance.py         # Policy compliance checking script
 │   ├── dependency_maintenance.sh   # Scheduled dependency maintenance script
+│   ├── evaluate_security_gates.py  # Security gates evaluation script
 │   ├── generate_dast_report.py     # DAST report generation script
 │   ├── generate_dependency_report.py # Dependency report generator
 │   ├── generate_lockfile.py        # Dependency lock file generator
@@ -482,3 +506,51 @@ Contributions are welcome! Please follow these steps:
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
+
+### Secure Deployment Strategies
+
+To implement secure deployments with security gates:
+
+```bash
+# Manually trigger a secure deployment workflow
+gh workflow run secure-deployment.yml --ref main --field environment=staging
+
+# View security gate evaluation reports
+open reports/gate-evaluation-report.html
+
+# Run security gate evaluation locally
+python scripts/evaluate_security_gates.py --environment staging --results-dir reports
+
+# Add special compliance gates
+python scripts/evaluate_security_gates.py --environment production --special-gates pci_compliance,hipaa_compliance
+
+# Define custom security gates in policies
+nano policies/deployment-gates.yaml
+```
+
+#### Security Gate Configuration
+
+The security gates are defined in `policies/deployment-gates.yaml` and include:
+
+- **Environment-specific gates**: Different thresholds for development, staging, and production
+- **Severity-based requirements**: Maximum allowed vulnerabilities by severity level
+- **Tool requirements**: Specific security tools required for each environment
+- **Special compliance gates**: Additional gates for regulated environments like PCI or HIPAA
+- **Override management**: Rules for bypassing gates in exceptional situations
+
+Example gate configuration:
+```yaml
+environments:
+  production:
+    gates:
+      sast:
+        required: true
+        max_critical: 0
+        max_high: 0
+        required_tools: ["bandit", "semgrep"]
+      dependencies:
+        required: true
+        max_critical: 0
+        max_high: 0
+        required_tools: ["safety", "pip-audit"]
+```

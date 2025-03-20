@@ -1,0 +1,114 @@
+# TruffleHog configuration for secrets scanning
+# This file defines the rules for detecting secrets in the codebase
+
+# Exclude paths that don't need scanning
+exclude:
+  - "**/*.md"
+  - "**/*.html"
+  - "**/test/fixtures/**"
+  - "**/README.md"
+  - "**/docs/**"
+  - "**/.git/**"
+  - "**/node_modules/**"
+  - "**/__pycache__/**"
+  - "**/*.pyc"
+  - "**/reports/**"
+  - "**/venv/**"
+  - "**/env/**"
+
+# Maximum detectors to use concurrently
+detector_concurrency: 10
+
+# Custom regular expressions for detecting secrets
+custom_regexes:
+  # AWS Access Key
+  - name: "AWS Access Key"
+    regex: "AKIA[0-9A-Z]{16}"
+    verify_regex: ""
+    severity: "high"
+    description: "AWS Access Key ID"
+
+  # API Key
+  - name: "Generic API Key"
+    regex: "api_key.*['\"][0-9a-zA-Z]{32,45}['\"]"
+    verify_regex: ""
+    severity: "high"
+    description: "Generic API key"
+
+  # Password in source code 
+  - name: "Hardcoded Password"
+    regex: "password.*['\"][^'\"]{8,}['\"]"
+    verify_regex: ""
+    severity: "high"
+    description: "Password in code"
+  
+  # Authentication Token
+  - name: "Authentication Token"
+    regex: "(auth|authentication)_token['\"]\\s*[:=]\\s*['\"][0-9a-zA-Z]{32,}['\"]"
+    verify_regex: ""
+    severity: "high"
+    description: "Authentication token in code"
+  
+  # JWT Token
+  - name: "JWT Token"
+    regex: "eyJ[a-zA-Z0-9]{10,}\\.[a-zA-Z0-9]{10,}\\.[a-zA-Z0-9_-]{10,}"
+    verify_regex: ""
+    severity: "high"
+    description: "JWT token in code"
+  
+  # Private Key
+  - name: "Private Key"
+    regex: "-----BEGIN PRIVATE KEY-----"
+    verify_regex: ""
+    severity: "critical"
+    description: "Private key in code"
+  
+  # RSA Private Key
+  - name: "RSA Private Key"
+    regex: "-----BEGIN RSA PRIVATE KEY-----"
+    verify_regex: ""
+    severity: "critical"
+    description: "RSA private key in code"
+
+  # GitHub Token
+  - name: "GitHub Token"
+    regex: "ghp_[a-zA-Z0-9]{36}"
+    verify_regex: ""
+    severity: "high"
+    description: "GitHub personal access token"
+
+  # Database Connection String
+  - name: "Database Connection String"
+    regex: "(mongodb|mysql|postgresql|sqlite|oracle)://[a-zA-Z0-9:@/._-]+"
+    verify_regex: ""
+    severity: "medium"
+    description: "Database connection string in code"
+  
+  # Slack Webhook
+  - name: "Slack Webhook"
+    regex: "https://hooks.slack.com/services/T[a-zA-Z0-9]{8}/B[a-zA-Z0-9]{8,12}/[a-zA-Z0-9]{24}"
+    verify_regex: ""
+    severity: "high"
+    description: "Slack webhook URL"
+
+# Default severity for built-in detectors
+defaults:
+  severity: "medium"
+
+# Ignore certain verifiable secrets (i.e., false positives)
+ignored_secrets:
+  - regex: "password.*['\"](password|example|changeme|test123|default)['\"]"
+    description: "Ignore obvious placeholder passwords"
+  
+  - regex: "api_key.*['\"](your_api_key_here|example)['\"]"
+    description: "Ignore placeholder API keys"
+
+# Verification settings
+verify:
+  enabled: true
+  timeout_seconds: 10
+  requests_per_second: 10
+
+# Output format options
+output:
+  format: "json" # Can be json, text, or sarif 

@@ -1,0 +1,118 @@
+name: Security Policy Enforcement
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'policies/**'
+      - '.github/workflows/policy-enforcement.yml'
+      - 'scripts/check_compliance.py'
+  pull_request:
+    branches: [ main ]
+  schedule:
+    - cron: '0 0 * * 1'  # Run weekly on Mondays at midnight
+
+jobs:
+  policy-compliance:
+    name: Check Compliance with Security Policies
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0  # Fetch all history for policy analysis
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyyaml
+      
+      - name: Install security tools
+        run: |
+          # Install TruffleHog for secrets scanning
+          pip install trufflehog
+          
+          # Install Semgrep for SAST
+          pip install semgrep
+          
+          # Install Bandit for SAST
+          pip install bandit
+          
+          # Install Safety for dependency scanning
+          pip install safety
+      
+      - name: Check for secrets in codebase
+        run: |
+          mkdir -p reports/secrets
+          trufflehog filesystem --config policies/trufflehog-config.yaml --json ./ > reports/secrets/trufflehog-results.json || true
+          echo "Found $(cat reports/secrets/trufflehog-results.json | wc -l) potential secrets"
+          
+          # Check if critical secrets were found
+          if grep -q "critical" reports/secrets/trufflehog-results.json; then
+            echo "::error::Critical secrets were found in the codebase. Check the reports."
+            echo "Consider the following actions:"
+            echo "1. Remove the secrets from the codebase"
+            echo "2. Rotate any compromised credentials"
+            echo "3. Use proper secrets management tools"
+            exit 1
+          fi
+      
+      - name: Run compliance checks
+        run: |
+          mkdir -p reports/compliance
+          python scripts/check_compliance.py --policy-file policies/security-policies.yaml --output-dir reports/compliance --format both
+      
+      - name: Verify policy compliance
+        run: |
+          # Check if there are any critical or high violations
+          if grep -q '"severity": "critical"' reports/compliance/compliance_report_*.json || grep -q '"severity": "high"' reports/compliance/compliance_report_*.json; then
+            echo "::error::Critical or high severity policy violations were found. Check the compliance report."
+            exit 1
+          fi
+      
+      - name: Upload compliance reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: compliance-reports
+          path: reports/compliance/
+      
+      - name: Generate compliance badge
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          mkdir -p public/badges
+          
+          # Extract compliance status from latest report
+          LATEST_REPORT=$(ls -t reports/compliance/compliance_report_*.json | head -1)
+          COMPLIANCE_STATUS=$(grep -o '"compliance_status": "[^"]*"' $LATEST_REPORT | cut -d'"' -f4)
+          
+          if [ "$COMPLIANCE_STATUS" == "compliant" ]; then
+            COLOR="green"
+          else
+            COLOR="red"
+          fi
+          
+          # Generate badge JSON for shields.io
+          cat > public/badges/compliance.json << EOF
+          {
+            "schemaVersion": 1,
+            "label": "policy compliance",
+            "message": "$COMPLIANCE_STATUS",
+            "color": "$COLOR"
+          }
+          EOF
+      
+      - name: Deploy compliance reports to GitHub Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: peaceiris/actions-gh-pages@v3
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./public
+          destination_dir: compliance
+          keep_files: true 

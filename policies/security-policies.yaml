@@ -1,0 +1,223 @@
+# Security Policies and Compliance Rules
+# This file defines the security policies and compliance rules that must be enforced
+# in the CI/CD pipeline and across the application.
+
+# Policy version
+version: 1.0.0
+last_updated: "2025-03-20"
+
+# Metadata
+metadata:
+  name: "Security Testing Pipeline Policies"
+  description: "Security policies and compliance rules for the CI/CD pipeline"
+  owner: "Security Team"
+  contact: "security@example.com"
+
+# SAST Policies
+sast_policies:
+  # Severity thresholds - fail the build if violations exceed these limits
+  severity_thresholds:
+    critical: 0  # No critical severity issues allowed
+    high: 0      # No high severity issues allowed
+    medium: 5    # Up to 5 medium severity issues allowed
+    low: 10      # Up to 10 low severity issues allowed
+  
+  # Specific rules to enforce
+  required_checks:
+    - name: "sql-injection"
+      description: "Check for SQL injection vulnerabilities"
+      tool: "semgrep"
+      rule_id: "python.django.security.audit.sql-injection.sql-injection"
+      severity: "critical"
+      
+    - name: "os-command-injection"
+      description: "Check for OS command injection vulnerabilities"
+      tool: "semgrep"
+      rule_id: "python.lang.security.audit.os-command-injection.os-command-injection"
+      severity: "critical"
+    
+    - name: "hardcoded-credentials"
+      description: "Check for hardcoded credentials"
+      tool: "bandit"
+      rule_id: "B107"
+      severity: "high"
+
+    - name: "secure-random"
+      description: "Ensure secure random generators are used"
+      tool: "bandit"
+      rule_id: "B311"
+      severity: "medium"
+
+# DAST Policies
+dast_policies:
+  # Severity thresholds - fail the build if vulnerabilities exceed these limits
+  severity_thresholds:
+    critical: 0  # No critical severity issues allowed
+    high: 0      # No high severity issues allowed
+    medium: 3    # Up to 3 medium severity issues allowed
+    low: 10      # Up to 10 low severity issues allowed
+  
+  # Required ZAP scans
+  required_scans:
+    - name: "baseline-scan"
+      description: "Basic ZAP scan that passively finds issues"
+      fail_on_alert_level: "high"
+    
+    - name: "full-scan"
+      description: "Full ZAP scan with active scanning"
+      fail_on_alert_level: "high"
+      environments: ["staging", "production"]
+
+# Container Security Policies
+container_policies:
+  # Image scanning requirements
+  image_scanning:
+    block_on:
+      critical_vulnerabilities: true
+      high_vulnerabilities: true
+      fixable_vulnerabilities: true
+    
+    allowed_base_images:
+      - "python:3.10-slim"
+      - "python:3.11-slim"
+      - "python:3.12-slim"
+      - "ubuntu:22.04"
+      - "debian:bullseye-slim"
+  
+  # Runtime security requirements
+  runtime_security:
+    privileged_containers: false
+    root_containers: false
+    host_network: false
+    required_falco_rules:
+      - "container-escape-attempts"
+      - "sensitive-file-access"
+      - "prohibited-binaries-execution"
+
+# Dependency Management Policies
+dependency_policies:
+  # Automatically update dependencies with vulnerabilities
+  auto_update: true
+  
+  # Dependency scanning requirements
+  scanning:
+    block_on:
+      critical_vulnerabilities: true
+      high_vulnerabilities: true
+    
+    max_vulnerabilities:
+      critical: 0
+      high: 0
+      medium: 5
+      low: 10
+  
+  # License compliance
+  license_compliance:
+    allowed_licenses:
+      - "MIT"
+      - "Apache-2.0"
+      - "BSD-3-Clause"
+      - "BSD-2-Clause"
+      - "ISC"
+      - "Python-2.0"
+    
+    prohibited_licenses:
+      - "GPL-3.0"
+      - "AGPL-3.0"
+      - "LGPL-3.0"
+      - "Proprietary"
+    
+    allowed_with_approval:
+      - "GPL-2.0"
+      - "LGPL-2.1"
+
+# Secrets Management Policies
+secrets_policies:
+  # Prevent secrets from being committed
+  prevent_secrets_in_code: true
+  
+  # Tools to detect secrets
+  detection_tools:
+    - "git-secrets"
+    - "trufflehog"
+  
+  # Regex patterns for secrets detection
+  secret_patterns:
+    - name: "AWS Access Key"
+      pattern: "AKIA[0-9A-Z]{16}"
+      description: "AWS Access Key ID"
+    
+    - name: "API Key"
+      pattern: "api_key.*['\"][0-9a-zA-Z]{32,45}['\"]"
+      description: "Generic API key"
+    
+    - name: "Password"
+      pattern: "password.*['\"][^'\"]{8,}['\"]"
+      description: "Password in code"
+
+# Compliance Standards
+compliance_standards:
+  # Frameworks to comply with
+  frameworks:
+    - name: "OWASP Top 10"
+      version: "2021"
+      mapping:
+        - requirement: "A01:2021-Broken Access Control"
+          checks: ["dast_policies.required_scans.full-scan"]
+        
+        - requirement: "A02:2021-Cryptographic Failures"
+          checks: ["sast_policies.required_checks.secure-random"]
+        
+        - requirement: "A03:2021-Injection"
+          checks: ["sast_policies.required_checks.sql-injection", "sast_policies.required_checks.os-command-injection"]
+        
+        - requirement: "A07:2021-Identification and Authentication Failures"
+          checks: ["sast_policies.required_checks.hardcoded-credentials"]
+    
+    - name: "NIST 800-53"
+      version: "Rev. 5"
+      mapping:
+        - requirement: "RA-5 Vulnerability Scanning"
+          checks: ["dependency_policies.scanning"]
+        
+        - requirement: "SA-11 Developer Security Testing and Evaluation"
+          checks: ["sast_policies", "dast_policies"]
+        
+        - requirement: "CM-7 Least Functionality"
+          checks: ["container_policies.runtime_security"]
+
+# CI/CD Pipeline Enforcement
+pipeline_enforcement:
+  # Define which pipeline stages enforce policies
+  stages:
+    - name: "commit"
+      enforce:
+        - "secrets_policies"
+    
+    - name: "build"
+      enforce:
+        - "dependency_policies"
+        - "sast_policies"
+    
+    - name: "test"
+      enforce:
+        - "dast_policies"
+    
+    - name: "deploy"
+      enforce:
+        - "container_policies"
+  
+  # What happens when policies are violated
+  violation_actions:
+    block_pipeline: true    # Block the pipeline on policy violations
+    notify_security_team: true   # Notify security team on violations
+    create_jira_ticket: false    # Create Jira ticket for violations
+    fail_silently: false   # Don't fail but log warnings
+  
+  # Exceptions or temporary waivers
+  exceptions:
+    - policy: "dependency_policies.license_compliance.prohibited_licenses"
+      exception: "GPL-3.0"
+      reason: "Required for legacy component XYZ until Q3 2025"
+      approved_by: "Security Team"
+      expiration: "2025-09-30" 

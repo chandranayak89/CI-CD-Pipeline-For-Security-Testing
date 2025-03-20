@@ -1,0 +1,188 @@
+### Deployment Security Gates Configuration ###
+# Version: 1.0.0
+# Last Updated: 2023-08-15
+
+# Metadata
+metadata:
+  name: "Deployment Security Gates"
+  description: "Security requirements that must be met before deployment"
+  owner: "Security Team"
+  contact: "security@example.com"
+
+# Gate definitions for different environments
+environments:
+  development:
+    enabled: true
+    description: "Security gates for development deployments"
+    gates:
+      sast:
+        required: true
+        max_critical: 0
+        max_high: 5
+        max_medium: 10
+        required_tools: ["bandit", "semgrep"]
+      
+      dast:
+        required: false  # Optional for dev
+        max_high: 5
+      
+      container:
+        required: true
+        max_critical: 0
+        max_high: 3
+        required_tools: ["trivy"]
+      
+      dependencies:
+        required: true
+        max_critical: 0
+        max_high: 1
+        required_tools: ["safety"]
+      
+      policy:
+        required: true
+        compliance_score: 85  # Minimum percentage
+        
+  staging:
+    enabled: true
+    description: "Security gates for staging deployments"
+    gates:
+      sast:
+        required: true
+        max_critical: 0
+        max_high: 1
+        max_medium: 5
+        required_tools: ["bandit", "semgrep"]
+      
+      dast:
+        required: true
+        max_critical: 0
+        max_high: 3
+        max_medium: 5
+        required_tools: ["zap-baseline"]
+      
+      container:
+        required: true
+        max_critical: 0
+        max_high: 0
+        max_medium: 3
+        required_tools: ["trivy"]
+      
+      dependencies:
+        required: true
+        max_critical: 0
+        max_high: 0
+        required_tools: ["safety", "pip-audit"]
+      
+      policy:
+        required: true
+        compliance_score: 90
+        
+      secrets:
+        required: true
+        max_high: 0
+        max_medium: 0
+        required_tools: ["trufflehog"]
+        
+  production:
+    enabled: true
+    description: "Security gates for production deployments"
+    gates:
+      sast:
+        required: true
+        max_critical: 0
+        max_high: 0
+        max_medium: 3
+        required_tools: ["bandit", "semgrep"]
+      
+      dast:
+        required: true
+        max_critical: 0
+        max_high: 0
+        max_medium: 2
+        required_tools: ["zap-full-scan"]
+      
+      container:
+        required: true
+        max_critical: 0
+        max_high: 0
+        max_medium: 0
+        required_tools: ["trivy"]
+      
+      dependencies:
+        required: true
+        max_critical: 0
+        max_high: 0
+        max_medium: 0
+        required_tools: ["safety", "pip-audit"]
+      
+      policy:
+        required: true
+        compliance_score: 100
+        
+      secrets:
+        required: true
+        max_high: 0
+        max_medium: 0
+        required_tools: ["trufflehog"]
+        
+      runtime_security:
+        required: true
+        rules_validated: true
+        required_tools: ["falco"]
+
+# Special gates that can be applied to any environment
+special_gates:
+  pci_compliance:
+    enabled: false
+    description: "Additional gates for PCI-DSS compliance"
+    gates:
+      policy:
+        compliance_score: 100
+        frameworks: ["PCI-DSS"]
+      
+      secrets:
+        max_high: 0
+        max_medium: 0
+        max_low: 0
+        
+  hipaa_compliance:
+    enabled: false
+    description: "Additional gates for HIPAA compliance"
+    gates:
+      policy:
+        compliance_score: 100
+        frameworks: ["HIPAA"]
+      
+      secrets:
+        max_high: 0
+        max_medium: 0
+        max_low: 0
+
+# Manual overrides
+overrides:
+  allowed: false  # Whether overrides are permitted
+  approvers:  # Required approvers for an override
+    - "security-team-lead"
+    - "cto"
+  documentation_required: true  # Whether justification documentation is required
+  expiry: 7  # Days until override expires
+  
+# Notifications
+notifications:
+  gate_failure:
+    slack: true
+    email: true
+    recipients:
+      - "devops@example.com"
+      - "security@example.com"
+  
+  gate_success:
+    slack: true
+    email: false
+    
+# Reporting
+reports:
+  generate_html: true
+  generate_json: true
+  store_history: true  # Store historical gate results
+  retention_days: 90  # How long to keep history 

@@ -1,0 +1,77 @@
+repos:
+  # Secrets scanning with TruffleHog
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.16.3
+    hooks:
+      - id: gitleaks
+        name: Detect hardcoded secrets
+        description: Scan for hardcoded secrets using Gitleaks
+        entry: gitleaks protect --verbose --redact --staged
+
+  # SAST pre-commit hooks
+  - repo: https://github.com/PyCQA/bandit
+    rev: 1.7.5
+    hooks:
+      - id: bandit
+        name: Check for Python security issues
+        description: Run Bandit against Python files
+        args: ["-c", "policies/bandit.yaml", "-r"]
+        files: \.py$
+        language: python
+        exclude: ^test/
+
+  # Semgrep scanning
+  - repo: https://github.com/returntocorp/semgrep
+    rev: v1.25.0
+    hooks:
+      - id: semgrep
+        name: Semgrep security scan
+        entry: semgrep
+        args: ["--config", "p/python", "--config", "p/security-audit", "--error"]
+        language: python
+        files: \.py$
+        exclude: ^test/
+
+  # Custom security policy checker (local implementation)
+  - repo: local
+    hooks:
+      - id: policy-compliance
+        name: Check for security policy compliance
+        description: Validate code changes against security policies
+        entry: python scripts/precommit_policy_check.py
+        language: python
+        pass_filenames: true
+        
+      - id: check-security-yaml
+        name: Validate security YAML files
+        description: Check that security YAML files are valid
+        entry: python -c "import yaml; import sys; yaml.safe_load(open(sys.argv[1]).read())"
+        language: python
+        files: policies/.*\.yaml$
+        
+      - id: dependency-check
+        name: Check for vulnerable dependencies
+        description: Verify that no vulnerable dependencies are being added
+        entry: python scripts/check_dependency_vulnerability.py
+        language: python
+        files: requirements\.txt$
+
+  # Ensure no large files are accidentally committed
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.4.0
+    hooks:
+      - id: check-yaml
+        name: Check YAML syntax
+      - id: check-json
+        name: Check JSON syntax
+      - id: check-added-large-files
+        name: Check for large files
+        args: ['--maxkb=500']
+      - id: trailing-whitespace
+        name: Trim trailing whitespace
+      - id: end-of-file-fixer
+        name: Fix end of files
+      - id: check-merge-conflict
+        name: Check for merge conflicts
+      - id: detect-private-key
+        name: Detect private keys 

@@ -1,0 +1,156 @@
+name: Static Application Security Testing (SAST)
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  schedule:
+    - cron: '0 0 * * 0'  # Run weekly at midnight on Sunday
+
+jobs:
+  bandit:
+    name: Bandit SAST Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install bandit
+      
+      - name: Run Bandit SAST scan
+        run: |
+          bandit -r src/ -f json -o bandit-results.json
+        continue-on-error: true  # Continue even if vulnerabilities are found
+      
+      - name: Upload Bandit scan results
+        uses: actions/upload-artifact@v3
+        with:
+          name: bandit-results
+          path: bandit-results.json
+      
+      - name: Check for high severity issues
+        run: |
+          if grep -q '"SEVERITY_HIGH": [1-9]' bandit-results.json; then
+            echo "High severity security issues found!"
+            exit 1
+          else
+            echo "No high severity issues found."
+          fi
+
+  semgrep:
+    name: Semgrep Analysis
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Semgrep scan
+        uses: semgrep/semgrep-action@v1
+        with:
+          config: >-
+            p/security-audit
+            p/owasp-top-ten
+            p/python
+          generateSarif: true
+      
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: semgrep.sarif
+
+  dependency-check:
+    name: Dependency Vulnerability Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install safety
+      
+      - name: Check dependencies for vulnerabilities
+        run: |
+          safety check -r requirements.txt --output json > safety-results.json
+        continue-on-error: true
+      
+      - name: Upload safety scan results
+        uses: actions/upload-artifact@v3
+        with:
+          name: safety-results
+          path: safety-results.json
+      
+      - name: Display vulnerabilities summary
+        run: |
+          echo "Dependency vulnerability scan completed."
+          echo "Results are available in the artifacts."
+          if [ -s safety-results.json ]; then
+            echo "Vulnerabilities found in dependencies. See safety-results.json for details."
+            cat safety-results.json
+          else
+            echo "No vulnerabilities found in dependencies."
+          fi
+
+  report:
+    name: Generate Security Report
+    needs: [bandit, semgrep, dependency-check]
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Download scan results
+        uses: actions/download-artifact@v3
+        with:
+          path: security-results
+      
+      - name: Generate security report
+        run: |
+          echo "# Security Scan Report" > security-report.md
+          echo "## Scan Performed at: $(date)" >> security-report.md
+          echo "## Summary" >> security-report.md
+          
+          echo "### Bandit Scan Results" >> security-report.md
+          if [ -f security-results/bandit-results/bandit-results.json ]; then
+            echo "Bandit scan completed. See the artifact for details." >> security-report.md
+            echo "\`\`\`" >> security-report.md
+            cat security-results/bandit-results/bandit-results.json | grep -o '"SEVERITY_HIGH": [0-9]*' >> security-report.md
+            cat security-results/bandit-results/bandit-results.json | grep -o '"SEVERITY_MEDIUM": [0-9]*' >> security-report.md
+            cat security-results/bandit-results/bandit-results.json | grep -o '"SEVERITY_LOW": [0-9]*' >> security-report.md
+            echo "\`\`\`" >> security-report.md
+          else
+            echo "Bandit scan results not available." >> security-report.md
+          fi
+          
+          echo "### Dependency Scan Results" >> security-report.md
+          if [ -f security-results/safety-results/safety-results.json ]; then
+            echo "Dependency scan completed. See the artifact for details." >> security-report.md
+          else
+            echo "Dependency scan results not available." >> security-report.md
+          fi
+      
+      - name: Upload security report
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-report
+          path: security-report.md 

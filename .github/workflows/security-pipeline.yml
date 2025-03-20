@@ -7,166 +7,155 @@ on:
     branches: [ main ]
   schedule:
     - cron: '0 0 * * 0'  # Run weekly on Sundays at midnight
+  workflow_dispatch:  # Allow manual triggering
 
 jobs:
   security-scan:
-    name: Security Scan
+    name: Comprehensive Security Scan
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      - name: Checkout code
+        uses: actions/checkout@v3
       
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
-        
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        # Install security scanning tools
-        pip install bandit safety semgrep
-        
-    - name: Run Bandit (SAST)
-      run: |
-        bandit -r src/ -f json -o bandit-results.json
-      continue-on-error: true
+      # Set up Python
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
       
-    - name: Run Safety (Dependency scanning)
-      run: |
-        safety check -r requirements.txt --json > safety-results.json
-      continue-on-error: true
+      # Install dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install safety bandit semgrep pip-audit pip-licenses
       
-    - name: Run Semgrep (SAST with custom rules)
-      run: |
-        semgrep --config=p/python --config=p/security-audit src/ --json > semgrep-results.json
-      continue-on-error: true
-      
-    - name: Upload security scan results
-      uses: github/codeql-action/upload-sarif@v2
-      with:
-        sarif_file: semgrep-results.json
-        
-    - name: Archive security results
-      uses: actions/upload-artifact@v3
-      with:
-        name: security-scan-results
-        path: |
-          bandit-results.json
-          safety-results.json
-          semgrep-results.json
+      # SAST - Static Application Security Testing
+      - name: Run Static Analysis (SAST)
+        run: |
+          # Create reports directory
+          mkdir -p reports/sast
           
-  lint-and-test:
-    name: Lint and Test
-    runs-on: ubuntu-latest
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
-      
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
-        
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install -r requirements.txt
-        pip install pylint pytest pytest-cov
-        
-    - name: Lint with pylint
-      run: |
-        pylint src/ --output-format=json > pylint-results.json
-      continue-on-error: true
-      
-    - name: Run tests with coverage
-      run: |
-        pytest --cov=src tests/ --cov-report=xml --cov-report=html
-      continue-on-error: true
-      
-    - name: Archive test results
-      uses: actions/upload-artifact@v3
-      with:
-        name: test-results
-        path: |
-          pylint-results.json
-          coverage.xml
-          htmlcov/
+          # Run Bandit scan
+          bandit -r src/ -f json -o reports/sast/bandit-results.json
+          bandit -r src/ -f html -o reports/sast/bandit-results.html
           
-  build-and-publish:
-    name: Build and Publish
-    needs: [security-scan, lint-and-test]
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+          # Run Semgrep scan
+          semgrep --config=p/python --config=p/security-audit src/ --json > reports/sast/semgrep-results.json
+          
+          # Summary of findings
+          echo "SAST Results Summary:"
+          echo "Bandit findings:"
+          bandit -r src/ --format txt | grep "Issue" | wc -l
+          echo "Semgrep findings:"
+          cat reports/sast/semgrep-results.json | grep "check_id" | wc -l
+
+      # Dependency Scanning
+      - name: Run Dependency Vulnerability Scanning
+        run: |
+          # Create reports directory
+          mkdir -p reports/dependency-scan
+          
+          # Run Safety scan
+          safety check -r requirements.txt --json > reports/dependency-scan/safety-report.json
+          safety check -r requirements.txt --output text > reports/dependency-scan/safety-report.txt
+          
+          # Run pip-audit scan
+          pip-audit -r requirements.txt -f json > reports/dependency-scan/pip-audit-report.json
+          
+          # Generate license report
+          pip-licenses --format=json > reports/dependency-scan/dependency-licenses.json
+          pip-licenses --format=markdown > reports/dependency-scan/dependency-licenses.md
+          
+          # Generate HTML report
+          python scripts/generate_dependency_report.py
+          
+          # Summary of findings
+          echo "Dependency Scanning Results Summary:"
+          echo "Safety findings:"
+          cat reports/dependency-scan/safety-report.txt | grep -i "vulnerability" | wc -l
+          
+          # Check for dependency update recommendations
+          python scripts/update_dependencies.py --report
       
-    - name: Set up Python
-      uses: actions/setup-python@v4
-      with:
-        python-version: '3.10'
-        
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install build twine
-        
-    - name: Build package
-      run: |
-        python -m build
-        
-    - name: Check package
-      run: |
-        twine check dist/*
-        
-    # Uncomment when ready to publish to PyPI
-    # - name: Publish package to PyPI
-    #   uses: pypa/gh-action-pypi-publish@release/v1
-    #   with:
-    #     user: __token__
-    #     password: ${{ secrets.PYPI_API_TOKEN }}
-    
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      with:
-        files: dist/*
-        name: Release ${{ github.ref_name }}
-        draft: false
-        prerelease: false
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        
-  security-dashboard:
-    name: Update Security Dashboard
-    needs: [security-scan]
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    
-    steps:
-    - name: Checkout code
-      uses: actions/checkout@v3
+      # Container Scanning (if Docker file exists)
+      - name: Set up Docker Buildx
+        if: hashFiles('Dockerfile') != ''
+        uses: docker/setup-buildx-action@v2
       
-    - name: Download scan results
-      uses: actions/download-artifact@v3
-      with:
-        name: security-scan-results
-        path: security-results
-        
-    - name: Process security results
-      run: |
-        # Process security scan results to create summary dashboard
-        # This could be a custom script that aggregates the results
-        python scripts/process_security_results.py --input security-results --output security-dashboard.html
-      continue-on-error: true
+      - name: Build Docker image
+        if: hashFiles('Dockerfile') != ''
+        run: |
+          docker build -t security-testing-pipeline:latest .
       
-    - name: Deploy Security Dashboard
-      uses: JamesIves/github-pages-deploy-action@v4
-      with:
-        folder: security-dashboard
-        branch: gh-pages
-        target-folder: security-dashboard 
+      - name: Run Trivy container scan
+        if: hashFiles('Dockerfile') != ''
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: 'security-testing-pipeline:latest'
+          format: 'json'
+          output: 'reports/container-scan/trivy-results.json'
+      
+      # Generate comprehensive security report
+      - name: Generate Comprehensive Security Report
+        run: |
+          mkdir -p security-dashboard
+          cat > security-dashboard/index.html << EOL
+          <!DOCTYPE html>
+          <html>
+          <head>
+            <title>Security Testing Pipeline - Results</title>
+            <style>
+              body { font-family: Arial, sans-serif; margin: 20px; }
+              h1, h2 { color: #333; }
+              .report-section { margin: 20px 0; padding: 20px; border: 1px solid #ddd; border-radius: 5px; }
+              .report-link { display: inline-block; margin: 10px; padding: 10px; background-color: #f0f0f0; 
+                            border-radius: 5px; text-decoration: none; color: #333; }
+              .warning { color: #f0ad4e; }
+              .danger { color: #d9534f; }
+              .info { color: #5bc0de; }
+              .success { color: #5cb85c; }
+            </style>
+          </head>
+          <body>
+            <h1>Security Testing Pipeline Results</h1>
+            <p>Generated on: $(date)</p>
+            
+            <div class="report-section">
+              <h2>Static Application Security Testing (SAST)</h2>
+              <a class="report-link" href="sast/bandit-results.html">Bandit Report</a>
+              <a class="report-link" href="sast/semgrep-results.json">Semgrep Report</a>
+            </div>
+            
+            <div class="report-section">
+              <h2>Dependency Vulnerability Scanning</h2>
+              <a class="report-link" href="dependency-scan/index.html">Dependency Security Report</a>
+              <a class="report-link" href="dependency-scan/dependency-licenses.md">License Report</a>
+            </div>
+            
+            <div class="report-section">
+              <h2>Container Security Scanning</h2>
+              <a class="report-link" href="container-scan/trivy-results.json">Trivy Scan Report</a>
+            </div>
+          </body>
+          </html>
+          EOL
+      
+      # Archive security scan results
+      - name: Archive security results
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-scan-results
+          path: |
+            reports/
+            security-dashboard/
+      
+      # Deploy security dashboard to GitHub Pages
+      - name: Deploy Security Dashboard
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: security-dashboard
+          branch: gh-pages
+          target-folder: dashboard 

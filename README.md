@@ -1,6 +1,6 @@
 # CI-CD-Pipeline-For-Security-Testing
 
-A comprehensive CI/CD pipeline implementation focused on security testing, combining Static Application Security Testing (SAST), Dynamic Application Security Testing (DAST), and Container Security Scanning to identify vulnerabilities in Python applications.
+A comprehensive CI/CD pipeline implementation focused on security testing, combining Static Application Security Testing (SAST), Dynamic Application Security Testing (DAST), Container Security Scanning, Runtime Container Security, and Dependency Vulnerability Management to identify vulnerabilities in Python applications.
 
 ## Project Overview
 
@@ -10,7 +10,7 @@ This project implements an automated security testing pipeline using GitHub Acti
 2. **Dynamic Application Security Testing (DAST)** - Testing running applications for security issues
 3. **Container Security Scanning** - Scanning container images for vulnerabilities
 4. **Runtime Container Security** - Monitoring containers during execution for suspicious behavior
-5. **Dependency Scanning** - Checking for vulnerabilities in dependencies
+5. **Dependency Vulnerability Management** - Automating third-party dependency security checks and updates
 6. **Security Dashboard** - Visualizing security findings
 
 ## Pipeline Components
@@ -54,18 +54,29 @@ Tools implemented:
   - Real-time alerts for security violations
   - Custom security rules for application-specific threats
 
-### Dependency Scanning
+### Dependency Vulnerability Management
 
-Checks for known vulnerabilities in third-party dependencies.
+Automates the process of checking, reporting, and updating third-party dependencies with security vulnerabilities.
 
 Tools implemented:
 - **Safety** - Checks Python dependencies against a database of known vulnerabilities
+- **pip-audit** - Audits Python packages for known vulnerabilities
+- **pip-licenses** - Generates reports of package licenses for compliance
+- **Dependency Locker** - Custom script to generate and maintain lock files
+- **Dependency Updater** - Custom script to automatically update vulnerable dependencies
+
+Features:
+- Automated vulnerability scanning
+- Detailed HTML security reports
+- Automated dependency updates via Pull Requests
+- License compliance monitoring
+- Dependency locking for consistent environments
 
 ### Security Dashboard
 
 Reports and visualizes security findings from all scanning tools.
 
-- HTML reports for SAST, DAST, container scanning, and runtime security
+- HTML reports for SAST, DAST, container scanning, runtime security, and dependency vulnerabilities
 - GitHub Pages integration for report hosting
 - Slack notifications for critical security events
 
@@ -81,12 +92,15 @@ CI-CD-Pipeline-For-Security-Testing/
 │       ├── sast.yml                # Static Analysis workflow
 │       ├── dast.yml                # Dynamic Analysis workflow
 │       ├── container-scan.yml      # Container scanning workflow
+│       ├── dependency-scan.yml     # Dependency scanning workflow
 │       └── runtime-security.yml    # Runtime security testing workflow
 ├── .zap/
 │   └── rules.tsv                   # ZAP scanning rules configuration
 ├── falco/
 │   ├── falco.yaml                  # Falco configuration
 │   └── falco_rules.yaml            # Custom Falco security rules
+├── reports/
+│   └── dependency-scan/            # Dependency scan reports
 ├── src/
 │   ├── __init__.py
 │   ├── main.py
@@ -96,13 +110,18 @@ CI-CD-Pipeline-For-Security-Testing/
 │   ├── alert_system.py
 │   └── web_dashboard.py
 ├── scripts/
+│   ├── dependency_maintenance.sh   # Scheduled dependency maintenance script
 │   ├── generate_dast_report.py     # DAST report generation script
-│   └── runtime_security_monitor.py # Runtime security monitoring script
+│   ├── generate_dependency_report.py # Dependency report generator
+│   ├── generate_lockfile.py        # Dependency lock file generator
+│   ├── runtime_security_monitor.py # Runtime security monitoring script
+│   └── update_dependencies.py      # Dependency updater script
 ├── test/
 │   └── ...                         # Test files
 ├── Dockerfile                      # Container definition
 ├── docker-compose.yml              # Multi-container application definition
 ├── requirements.txt                # Project dependencies
+├── requirements.lock               # Locked dependencies (generated)
 ├── .gitignore
 └── README.md
 ```
@@ -223,6 +242,34 @@ docker exec security-app sh -c "cat /etc/passwd"
 docker exec security-app sh -c "apt-get update"
 ```
 
+### Dependency Vulnerability Management
+
+To check and update dependencies locally:
+
+```bash
+# Create reports directory
+mkdir -p reports/dependency-scan
+
+# Run dependency vulnerability checks
+safety check -r requirements.txt --json > reports/dependency-scan/safety-report.json
+pip-audit -r requirements.txt -f json > reports/dependency-scan/pip-audit-report.json
+
+# Generate dependency reports
+python scripts/generate_dependency_report.py
+
+# Check for vulnerable dependencies and get update recommendations
+python scripts/update_dependencies.py
+
+# Apply updates to vulnerable dependencies
+python scripts/update_dependencies.py --apply
+
+# Generate a lock file for consistent dependencies
+python scripts/generate_lockfile.py --json
+
+# Run the complete dependency maintenance process
+bash scripts/dependency_maintenance.sh
+```
+
 ## CI/CD Pipeline
 
 The security testing is integrated into GitHub Actions workflows:
@@ -232,11 +279,44 @@ The security testing is integrated into GitHub Actions workflows:
    - DAST scans are run if application components are changed
    - Container scanning is run if Dockerfile or docker-compose.yml changes
    - Runtime security tests are run to validate security rules
+   - Dependency vulnerability scans are run if requirements.txt changes
    - Test results are uploaded as artifacts
 
 2. On scheduled weekly runs:
    - Complete security scans are performed
+   - Dependency updates are automated via PRs
    - Security dashboard is updated
+
+## Dependency Management Features
+
+The dependency vulnerability management component includes:
+
+1. **Vulnerability Scanning**: Multiple scanners identify known vulnerabilities in dependencies:
+   - Safety for CVE and vulnerability database checks
+   - pip-audit for additional vulnerability sources
+   - Custom severity-based classification
+
+2. **Automated Updates**: The system can automatically update vulnerable dependencies:
+   - Creates a separate Git branch for updates
+   - Generates detailed update reports
+   - Tests compatibility of updated dependencies
+   - Creates pull requests for review
+
+3. **Dependency Locking**: Ensures consistent environments:
+   - Generates detailed lock files with exact versions
+   - Captures all direct and transitive dependencies
+   - JSON format for machine readability
+   - Verification to ensure lock files match requirements
+
+4. **License Compliance**: Monitors licenses of all dependencies:
+   - Generates comprehensive license reports
+   - Identifies potential compliance issues
+   - Documents license distribution across dependencies
+
+5. **Scheduled Maintenance**: Regular dependency maintenance:
+   - Can be scheduled via cron jobs
+   - Automated notifications for security issues
+   - Detailed logs of all maintenance activities
 
 ## Runtime Security Features
 

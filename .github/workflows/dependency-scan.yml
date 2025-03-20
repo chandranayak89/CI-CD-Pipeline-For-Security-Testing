@@ -1,0 +1,97 @@
+name: Dependency Vulnerability Scanning
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'requirements.txt'
+      - 'setup.py'
+      - 'Pipfile'
+      - 'Pipfile.lock'
+      - 'poetry.lock'
+      - '.github/workflows/dependency-scan.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'requirements.txt'
+      - 'setup.py'
+      - 'Pipfile'
+      - 'Pipfile.lock'
+      - 'poetry.lock'
+  schedule:
+    - cron: '0 0 * * 1'  # Run weekly on Mondays at midnight
+  workflow_dispatch:  # Allow manual triggering
+
+jobs:
+  dependency-security-scan:
+    name: Dependency Security Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      # Set up Python environment
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      # Install basic dependencies
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install safety pyupio pip-audit pip-licenses
+      
+      # Run Safety check
+      - name: Run Safety Check
+        run: |
+          mkdir -p reports/dependency-scan
+          safety check -r requirements.txt --json > reports/dependency-scan/safety-report.json
+          safety check -r requirements.txt --output text > reports/dependency-scan/safety-report.txt
+          echo "Safety check completed"
+
+      # Run pip-audit
+      - name: Run pip-audit
+        run: |
+          pip-audit -r requirements.txt -f json > reports/dependency-scan/pip-audit-report.json
+          pip-audit -r requirements.txt > reports/dependency-scan/pip-audit-report.txt
+          echo "Pip audit completed"
+
+      # Generate dependency license report
+      - name: Generate License Report
+        run: |
+          pip-licenses --format=json > reports/dependency-scan/dependency-licenses.json
+          pip-licenses --format=markdown > reports/dependency-scan/dependency-licenses.md
+          echo "License report generated"
+
+      # Generate HTML report
+      - name: Generate HTML Report
+        run: |
+          python scripts/generate_dependency_report.py
+
+      # Check for high severity vulnerabilities
+      - name: Check for critical vulnerabilities
+        run: |
+          if grep -i "high\|critical" reports/dependency-scan/safety-report.txt; then
+            echo "Critical vulnerabilities found!"
+            exit 0  # Don't fail the build but notify
+          else
+            echo "No critical vulnerabilities found."
+          fi
+
+      # Archive results
+      - name: Archive dependency scan results
+        uses: actions/upload-artifact@v3
+        with:
+          name: dependency-scan-results
+          path: reports/dependency-scan
+
+      # Deploy the report to GitHub Pages if running on main branch
+      - name: Deploy Dependency Scan Report to GitHub Pages
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: JamesIves/github-pages-deploy-action@v4
+        with:
+          folder: reports/dependency-scan
+          branch: gh-pages
+          target-folder: dependency-scan 

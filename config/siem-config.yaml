@@ -1,0 +1,135 @@
+### SIEM Integration Configuration ###
+# Version: 1.0.0
+# Last Updated: 2023-08-15
+
+# Global Settings
+settings:
+  enabled: true
+  log_level: "info"
+  buffer_size: 1000  # Max events to buffer before forced flush
+  batch_interval: 60  # Seconds between batch sends
+  retention_days: 90  # How long to keep SIEM data
+
+# SIEM Providers
+providers:
+  # Splunk SIEM configuration
+  splunk:
+    enabled: true
+    hec_url: "${SPLUNK_HEC_URL:-http://splunk:8088}"
+    hec_token: "${SPLUNK_HEC_TOKEN}"
+    verify_ssl: true
+    source_type: "security:cicd"
+    index: "security"
+    batch_size: 10
+  
+  # Elasticsearch SIEM configuration (for Elastic Security)
+  elasticsearch:
+    enabled: true
+    url: "${ELASTICSEARCH_URL:-http://elasticsearch:9200}"
+    username: "${ELASTICSEARCH_USERNAME:-elastic}"
+    password: "${ELASTICSEARCH_PASSWORD}"
+    api_key: "${ELASTICSEARCH_API_KEY}"
+    verify_ssl: true
+    index_pattern: "security-cicd-events"
+    batch_size: 10
+  
+  # Wazuh SIEM configuration
+  wazuh:
+    enabled: false
+    syslog_host: "${WAZUH_HOST:-wazuh-manager}"
+    syslog_port: "${WAZUH_PORT:-514}"
+    syslog_protocol: "udp"  # udp or tcp
+    syslog_format: "cef"
+  
+  # QRadar SIEM configuration
+  qradar:
+    enabled: false
+    syslog_host: "${QRADAR_HOST}"
+    syslog_port: "${QRADAR_PORT:-514}"
+    syslog_protocol: "tcp"  # tcp recommended for QRadar
+    syslog_format: "leef"   # LEEF is preferred for QRadar
+  
+  # Generic syslog for other SIEM systems
+  syslog:
+    enabled: false
+    host: "${SYSLOG_HOST:-localhost}"
+    port: "${SYSLOG_PORT:-514}"
+    protocol: "udp"  # udp or tcp
+    facility: "local7"
+    format: "cef"    # cef or plain
+
+# Event Types to Collect
+event_types:
+  sast:
+    enabled: true
+    tools: ["bandit", "semgrep"]
+  
+  dast:
+    enabled: true
+    tools: ["zap"]
+  
+  container:
+    enabled: true
+    tools: ["trivy", "falco"]
+  
+  dependencies:
+    enabled: true
+    tools: ["safety", "pip-audit"]
+  
+  secrets:
+    enabled: true
+    tools: ["trufflehog", "gitleaks"]
+  
+  securitygate:
+    enabled: true
+  
+  deployment:
+    enabled: true
+  
+  compliance:
+    enabled: true
+    frameworks: ["PCI-DSS", "HIPAA", "NIST-800-53", "OWASP-Top-10"]
+
+# MITRE ATT&CK Mappings Configuration
+mitre_mappings:
+  enabled: true
+  default_tactics:
+    - "Initial Access"
+    - "Execution"
+    - "Persistence"
+    - "Privilege Escalation"
+    - "Defense Evasion"
+    - "Credential Access"
+    - "Discovery"
+    - "Lateral Movement"
+    - "Collection"
+    - "Exfiltration"
+    - "Command and Control"
+    - "Impact"
+
+# SIEM Alert Rules
+alerts:
+  failed_security_gate:
+    enabled: true
+    description: "Security gate failed during deployment"
+    severity: "high"
+  
+  critical_vulnerability:
+    enabled: true
+    description: "Critical vulnerability detected in CI/CD pipeline"
+    severity: "critical"
+  
+  possible_secrets_exposure:
+    enabled: true
+    description: "Potential exposure of secrets in code"
+    severity: "critical"
+  
+  compliance_violation:
+    enabled: true
+    description: "Compliance policy violation detected"
+    severity: "high"
+  
+  container_security_violation:
+    enabled: true
+    description: "Container security violation detected"
+    severity: "high" 

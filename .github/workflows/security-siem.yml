@@ -1,0 +1,128 @@
+name: Security SIEM Integration
+
+on:
+  workflow_run:
+    workflows: ["Secure Deployment Pipeline", "SAST", "DAST", "Container Security", "Dependency Scan", "Runtime Security"]
+    types:
+      - completed
+
+jobs:
+  siem-integration:
+    name: Forward Security Events to SIEM
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests cryptography pyyaml urllib3
+      
+      - name: Download artifacts
+        uses: dawidd6/action-download-artifact@v2
+        with:
+          workflow: ${{ github.event.workflow_run.workflow_id }}
+          run_id: ${{ github.event.workflow_run.id }}
+          path: security-reports
+      
+      - name: Process security scan results
+        if: success()
+        env:
+          SPLUNK_HEC_URL: ${{ secrets.SPLUNK_HEC_URL }}
+          SPLUNK_HEC_TOKEN: ${{ secrets.SPLUNK_HEC_TOKEN }}
+          ELASTICSEARCH_URL: ${{ secrets.ELASTICSEARCH_URL }}
+          ELASTICSEARCH_USERNAME: ${{ secrets.ELASTICSEARCH_USERNAME }}
+          ELASTICSEARCH_PASSWORD: ${{ secrets.ELASTICSEARCH_PASSWORD }}
+          WAZUH_HOST: ${{ secrets.WAZUH_HOST }}
+          QRADAR_HOST: ${{ secrets.QRADAR_HOST }}
+        run: |
+          # Process the results and send to SIEM systems
+          if [ -d "security-reports/security-reports" ]; then
+            
+            # Process SAST results
+            if [ -f "security-reports/security-reports/bandit-results.json" ]; then
+              python scripts/siem_integration.py --action process_scan --scan-type SAST --tool bandit --results-file security-reports/security-reports/bandit-results.json
+            fi
+            
+            if [ -f "security-reports/security-reports/semgrep-results.json" ]; then
+              python scripts/siem_integration.py --action process_scan --scan-type SAST --tool semgrep --results-file security-reports/security-reports/semgrep-results.json
+            fi
+            
+            # Process DAST results
+            if [ -f "security-reports/security-reports/zap-baseline-results.json" ]; then
+              python scripts/siem_integration.py --action process_scan --scan-type DAST --tool zap --results-file security-reports/security-reports/zap-baseline-results.json
+            fi
+            
+            if [ -f "security-reports/security-reports/zap-full-scan-results.json" ]; then
+              python scripts/siem_integration.py --action process_scan --scan-type DAST --tool zap --results-file security-reports/security-reports/zap-full-scan-results.json
+            fi
+            
+            # Process Container Security results
+            if [ -f "security-reports/security-reports/trivy-results.json" ]; then
+              python scripts/siem_integration.py --action process_scan --scan-type Container --tool trivy --results-file security-reports/security-reports/trivy-results.json
+            fi
+            
+            # Process Dependency Security results
+            if [ -f "security-reports/security-reports/safety-results.json" ]; then
+              python scripts/siem_integration.py --action process_scan --scan-type Dependencies --tool safety --results-file security-reports/security-reports/safety-results.json
+            fi
+            
+            if [ -f "security-reports/security-reports/pip-audit-results.json" ]; then
+              python scripts/siem_integration.py --action process_scan --scan-type Dependencies --tool pip-audit --results-file security-reports/security-reports/pip-audit-results.json
+            fi
+            
+            # Process Secrets Detection results
+            if [ -f "security-reports/security-reports/trufflehog-results.json" ]; then
+              python scripts/siem_integration.py --action process_scan --scan-type Secrets --tool trufflehog --results-file security-reports/security-reports/trufflehog-results.json
+            fi
+            
+            # Process Security Gate results
+            if [ -f "security-reports/gates-evaluation-report/gate-evaluation-report.json" ]; then
+              ENVIRONMENT=$(jq -r '.environment' security-reports/gates-evaluation-report/gate-evaluation-report.json)
+              PASSED=$(jq -r '.passed' security-reports/gates-evaluation-report/gate-evaluation-report.json)
+              
+              PASSED_FLAG=""
+              if [ "$PASSED" = "true" ]; then
+                PASSED_FLAG="--passed"
+              fi
+              
+              python scripts/siem_integration.py --action process_gate --gate-type SecureDeployment --environment "$ENVIRONMENT" $PASSED_FLAG --details-file security-reports/gates-evaluation-report/gate-evaluation-report.json
+            fi
+          fi
+      
+      - name: Process workflow status for SIEM
+        if: always()
+        env:
+          SPLUNK_HEC_URL: ${{ secrets.SPLUNK_HEC_URL }}
+          SPLUNK_HEC_TOKEN: ${{ secrets.SPLUNK_HEC_TOKEN }}
+          ELASTICSEARCH_URL: ${{ secrets.ELASTICSEARCH_URL }}
+          ELASTICSEARCH_USERNAME: ${{ secrets.ELASTICSEARCH_USERNAME }}
+          ELASTICSEARCH_PASSWORD: ${{ secrets.ELASTICSEARCH_PASSWORD }}
+        run: |
+          # Create a temporary JSON file with workflow details
+          cat > workflow_details.json << EOF
+          {
+            "workflow_name": "${{ github.event.workflow_run.name }}",
+            "workflow_id": "${{ github.event.workflow_run.id }}",
+            "repository": "${{ github.repository }}",
+            "conclusion": "${{ github.event.workflow_run.conclusion }}",
+            "branch": "${{ github.event.workflow_run.head_branch }}",
+            "commit_sha": "${{ github.event.workflow_run.head_sha }}",
+            "run_url": "${{ github.event.workflow_run.html_url }}"
+          }
+          EOF
+          
+          # Send workflow status to SIEM
+          SUCCESS_FLAG=""
+          if [ "${{ github.event.workflow_run.conclusion }}" = "success" ]; then
+            SUCCESS_FLAG="--success"
+          fi
+          
+          python scripts/siem_integration.py --action process_deployment --event-type workflow_completed --environment "${{ github.event.workflow_run.head_branch }}" $SUCCESS_FLAG --details-file workflow_details.json 

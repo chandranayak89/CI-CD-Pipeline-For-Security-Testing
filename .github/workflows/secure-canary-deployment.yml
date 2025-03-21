@@ -1,0 +1,468 @@
+name: Secure Canary Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment for deployment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      canary_percentage:
+        description: 'Percentage of traffic to route to canary (1-50)'
+        required: true
+        default: '5'
+        type: number
+      monitoring_duration:
+        description: 'Duration to monitor canary before promotion (minutes)'
+        required: true
+        default: '30'
+        type: number
+      auto_promote:
+        description: 'Automatically promote if checks pass'
+        required: true
+        default: false
+        type: boolean
+
+env:
+  MONITORING_INTERVAL: 60 # seconds between security checks
+
+jobs:
+  security-pre-check:
+    name: Pre-Deployment Security Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Get security credentials
+        run: |
+          python scripts/secretes_manager.py temp-creds --output .ci-temp-credentials --duration 3600
+          source .ci-temp-credentials
+      
+      - name: Run security pre-deployment scan
+        run: |
+          mkdir -p ./reports/canary
+          # Run SAST, SCA, container security scans
+          python scripts/verify_supply_chain.py --policy security-policies/supply-chain-policy.yml --mode pre-deployment --output ./reports/canary/pre-deployment-security.json
+      
+      - name: Verify security baseline
+        id: security_baseline
+        run: |
+          # Check if security scan results meet the baseline requirements
+          python scripts/evaluate_security_gates.py \
+            --policy-config ./security-policies/deployment-policy.yml \
+            --input ./reports/canary/pre-deployment-security.json \
+            --output ./reports/canary/pre-deployment-gate.json
+          
+          if grep -q "\"passed\": false" ./reports/canary/pre-deployment-gate.json; then
+            echo "❌ Pre-deployment security check failed"
+            echo "result=failed" >> $GITHUB_OUTPUT
+            exit 1
+          else
+            echo "✅ Pre-deployment security check passed"
+            echo "result=passed" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Upload security results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: pre-deployment-security
+          path: ./reports/canary/
+          retention-days: 7
+
+  prepare-canary-infrastructure:
+    name: Prepare Canary Infrastructure
+    needs: security-pre-check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+      
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install boto3 kubernetes azure-identity azure-mgmt-containerservice
+      
+      - name: Get infrastructure credentials
+        run: |
+          # Retrieve appropriate credentials based on environment
+          if [ "${{ github.event.inputs.environment }}" == "production" ]; then
+            python scripts/secretes_manager.py get --name PROD_INFRA_CREDENTIALS --output .infra-credentials
+          else
+            python scripts/secretes_manager.py get --name STAGING_INFRA_CREDENTIALS --output .infra-credentials
+          fi
+          source .infra-credentials
+      
+      - name: Configure canary infrastructure
+        id: canary_setup
+        run: |
+          # This would call your infrastructure as code tool (Terraform, Pulumi, etc)
+          # Here we're just simulating with a script that configures load balancer, new pods, etc.
+          python scripts/setup_canary_environment.py \
+            --environment ${{ github.event.inputs.environment }} \
+            --percentage ${{ github.event.inputs.canary_percentage }} \
+            --output ./canary-config.json
+          
+          # Set canary identifier for later steps
+          CANARY_ID=$(cat ./canary-config.json | jq -r .canary_id)
+          echo "canary_id=$CANARY_ID" >> $GITHUB_OUTPUT
+      
+      - name: Configure security monitoring
+        run: |
+          # Set up enhanced security monitoring for the canary deployment
+          python scripts/configure_security_monitoring.py \
+            --canary-id ${{ steps.canary_setup.outputs.canary_id }} \
+            --alert-threshold low \
+            --environment ${{ github.event.inputs.environment }}
+      
+      - name: Upload canary configuration
+        uses: actions/upload-artifact@v3
+        with:
+          name: canary-config
+          path: ./canary-config.json
+          retention-days: 7
+
+  deploy-canary:
+    name: Deploy Canary
+    needs: prepare-canary-infrastructure
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Download canary configuration
+        uses: actions/download-artifact@v3
+        with:
+          name: canary-config
+          path: ./
+      
+      - name: Set up deployment tools
+        run: |
+          # Install deployment tools based on your infrastructure
+          python -m pip install --upgrade pip
+          pip install kubernetes boto3 azure-mgmt-containerinstance
+      
+      - name: Get deployment credentials
+        run: |
+          python scripts/secretes_manager.py get --name DEPLOYMENT_CREDENTIALS --output .deploy-credentials
+          source .deploy-credentials
+      
+      - name: Deploy canary version
+        id: deploy
+        run: |
+          # Read canary ID from previous step
+          CANARY_ID=$(cat ./canary-config.json | jq -r .canary_id)
+          
+          # Deploy with security hardening and instrumentation
+          python scripts/deploy_application.py \
+            --mode canary \
+            --canary-id $CANARY_ID \
+            --environment ${{ github.event.inputs.environment }} \
+            --security-hardening-level high \
+            --instrumentation-level enhanced
+          
+          echo "deployment_time=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> $GITHUB_OUTPUT
+      
+      - name: Register canary for vulnerability scanning
+        run: |
+          # Register the canary deployment for dynamic scanning
+          python scripts/register_security_scan.py \
+            --target canary \
+            --id ${{ steps.deploy.outputs.deployment_time }} \
+            --environment ${{ github.event.inputs.environment }}
+
+  monitor-canary:
+    name: Monitor Canary Deployment
+    needs: deploy-canary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Download canary configuration
+        uses: actions/download-artifact@v3
+        with:
+          name: canary-config
+          path: ./
+      
+      - name: Set up monitoring tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install prometheus-client requests boto3
+      
+      - name: Get monitoring credentials
+        run: |
+          python scripts/secretes_manager.py get --name MONITORING_CREDENTIALS --output .monitoring-credentials
+          source .monitoring-credentials
+      
+      - name: Continuous security monitoring
+        id: security_monitoring
+        run: |
+          # Read canary ID
+          CANARY_ID=$(cat ./canary-config.json | jq -r .canary_id)
+          
+          mkdir -p ./reports/canary-monitoring
+          
+          # Monitor for the specified duration
+          DURATION_SECONDS=$((${{ github.event.inputs.monitoring_duration }} * 60))
+          ITERATIONS=$((DURATION_SECONDS / ${{ env.MONITORING_INTERVAL }}))
+          
+          echo "Starting canary security monitoring for $DURATION_SECONDS seconds"
+          
+          # Initialize monitoring result
+          MONITORING_PASSED=true
+          
+          for (( i=1; i<=$ITERATIONS; i++ ))
+          do
+            echo "Running security check $i of $ITERATIONS"
+            
+            # Run security checks and collect metrics
+            python scripts/security_monitoring.py \
+              --canary-id $CANARY_ID \
+              --iteration $i \
+              --output ./reports/canary-monitoring/check-$i.json
+            
+            # Check for security anomalies
+            if grep -q "\"anomaly_detected\": true" ./reports/canary-monitoring/check-$i.json; then
+              echo "🚨 Security anomaly detected in iteration $i"
+              MONITORING_PASSED=false
+              break
+            fi
+            
+            # Wait for the next monitoring interval
+            sleep ${{ env.MONITORING_INTERVAL }}
+          done
+          
+          # Generate comprehensive monitoring report
+          python scripts/generate_security_report.py \
+            --input-dir ./reports/canary-monitoring/ \
+            --output ./reports/canary-security-report.json
+          
+          # Set output for next steps
+          if [ "$MONITORING_PASSED" = true ]; then
+            echo "status=pass" >> $GITHUB_OUTPUT
+          else
+            echo "status=fail" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Upload monitoring results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: canary-monitoring-results
+          path: ./reports/canary-monitoring/
+          retention-days: 7
+      
+      - name: Upload security report
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: canary-security-report
+          path: ./reports/canary-security-report.json
+          retention-days: 30
+
+  decide-promotion:
+    name: Decide Canary Promotion
+    needs: monitor-canary
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download monitoring results
+        uses: actions/download-artifact@v3
+        with:
+          name: canary-security-report
+          path: ./
+      
+      - name: Evaluate promotion criteria
+        id: evaluate
+        run: |
+          # Parse the security report
+          if grep -q "\"overall_status\": \"pass\"" ./canary-security-report.json; then
+            echo "✅ Canary security monitoring passed"
+            echo "decision=promote" >> $GITHUB_OUTPUT
+          else
+            echo "❌ Canary security monitoring failed"
+            echo "decision=rollback" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Determine next action
+        id: next_action
+        run: |
+          if [ "${{ steps.evaluate.outputs.decision }}" == "promote" ] && [ "${{ github.event.inputs.auto_promote }}" == "true" ]; then
+            echo "action=auto-promote" >> $GITHUB_OUTPUT
+          elif [ "${{ steps.evaluate.outputs.decision }}" == "promote" ]; then
+            echo "action=manual-approval" >> $GITHUB_OUTPUT
+          else
+            echo "action=rollback" >> $GITHUB_OUTPUT
+          fi
+    outputs:
+      next_action: ${{ steps.next_action.outputs.action }}
+      decision: ${{ steps.evaluate.outputs.decision }}
+
+  rollback-canary:
+    name: Rollback Canary Deployment
+    needs: decide-promotion
+    if: needs.decide-promotion.outputs.next_action == 'rollback'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Download canary configuration
+        uses: actions/download-artifact@v3
+        with:
+          name: canary-config
+          path: ./
+      
+      - name: Set up rollback tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Get rollback credentials
+        run: |
+          python scripts/secretes_manager.py get --name ROLLBACK_CREDENTIALS --output .rollback-credentials
+          source .rollback-credentials
+      
+      - name: Execute rollback
+        run: |
+          # Read canary ID
+          CANARY_ID=$(cat ./canary-config.json | jq -r .canary_id)
+          
+          # Perform rollback
+          python scripts/rollback_deployment.py \
+            --canary-id $CANARY_ID \
+            --environment ${{ github.event.inputs.environment }} \
+            --reason "Security monitoring failed"
+      
+      - name: Report rollback to security team
+        run: |
+          # Send notification with security context
+          python scripts/security_notification.py \
+            --event-type "canary-deployment-rollback" \
+            --environment ${{ github.event.inputs.environment }} \
+            --security-report-path ./canary-security-report.json \
+            --notify security-team devops-team
+
+  promote-canary:
+    name: Promote Canary Deployment
+    needs: decide-promotion
+    if: needs.decide-promotion.outputs.next_action == 'auto-promote' || needs.decide-promotion.outputs.next_action == 'manual-approval'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment == 'production' && 'Production' || 'Staging' }}
+    steps:
+      - name: Manual approval gate
+        if: needs.decide-promotion.outputs.next_action == 'manual-approval'
+        run: |
+          echo "This step requires manual approval in the GitHub environment protection rules"
+      
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Download canary configuration
+        uses: actions/download-artifact@v3
+        with:
+          name: canary-config
+          path: ./
+      
+      - name: Set up promotion tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Get promotion credentials
+        run: |
+          python scripts/secretes_manager.py get --name PROMOTION_CREDENTIALS --output .promotion-credentials
+          source .promotion-credentials
+      
+      - name: Promote canary to full deployment
+        run: |
+          # Read canary ID
+          CANARY_ID=$(cat ./canary-config.json | jq -r .canary_id)
+          
+          # Promote canary to full deployment
+          python scripts/promote_deployment.py \
+            --canary-id $CANARY_ID \
+            --environment ${{ github.event.inputs.environment }} \
+            --gradual true \
+            --promotion-step-percent 25 \
+            --promotion-interval 5 # minutes
+      
+      - name: Enable enhanced security monitoring
+        run: |
+          # Set up post-promotion security monitoring
+          python scripts/configure_security_monitoring.py \
+            --deployment-id $CANARY_ID \
+            --alert-threshold low \
+            --environment ${{ github.event.inputs.environment }} \
+            --duration 48 # hours
+
+  post-deployment-security-scan:
+    name: Post-Deployment Security Scan
+    needs: [promote-canary, rollback-canary]
+    if: always() && (needs.promote-canary.result == 'success' || needs.rollback-canary.result == 'success')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Set up scanning tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Get scanning credentials
+        run: |
+          python scripts/secretes_manager.py get --name SECURITY_SCAN_CREDENTIALS --output .scan-credentials
+          source .scan-credentials
+      
+      - name: Run comprehensive security scan
+        run: |
+          mkdir -p ./reports/post-deployment
+          
+          # Run DAST and IAST scans
+          python scripts/security_scan.py \
+            --environment ${{ github.event.inputs.environment }} \
+            --scan-type dast \
+            --output ./reports/post-deployment/dast-results.json
+            
+          # Analyze results and create summary
+          python scripts/analyze_security_results.py \
+            --input ./reports/post-deployment/ \
+            --output ./reports/post-deployment-summary.json
+      
+      - name: Upload scan results
+        uses: actions/upload-artifact@v3
+        with:
+          name: post-deployment-security
+          path: ./reports/post-deployment/
+          retention-days: 30
+      
+      - name: Send security report
+        run: |
+          python scripts/security_notification.py \
+            --event-type "post-deployment-security" \
+            --environment ${{ github.event.inputs.environment }} \
+            --security-report-path ./reports/post-deployment-summary.json \
+            --notify security-team devops-team management 

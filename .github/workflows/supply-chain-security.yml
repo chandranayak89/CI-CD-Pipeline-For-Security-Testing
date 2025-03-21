@@ -393,11 +393,20 @@ jobs:
           retention-days: 30
             
       - name: Check gate status
+        if: always()
         run: |
           if grep -q "\"passed\": false" ./reports/security-gate-result.json; then
             echo "❌ Security gate failed due to supply chain security issues"
             echo "See the detailed report in the workflow artifacts"
+            echo "Compliance report: ./reports/compliance-report.json"
+            echo "Security gate results: ./reports/security-gate-result.json" 
+            echo "SBOM: ./all-artifacts/dependency-scan-results/sbom.json"
+            exit 1
+          elif [ ! -f "./reports/security-gate-result.json" ]; then
+            echo "❌ Security gate results file not found"
+            echo "This likely indicates a failure in an earlier step"
             exit 1
           else
             echo "✅ Supply chain security gate passed"
+            echo "Full reports available in workflow artifacts"
           fi

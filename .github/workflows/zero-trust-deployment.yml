@@ -1,0 +1,796 @@
+name: Zero-Trust CI/CD Deployment
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment for deployment'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      deploy_version:
+        description: 'Version/tag to deploy'
+        required: true
+      verification_level:
+        description: 'Zero-trust verification level'
+        required: true
+        default: 'high'
+        type: choice
+        options:
+          - standard
+          - high
+          - maximum
+
+env:
+  COSIGN_VERSION: '2.2.0'
+  KUBESEC_VERSION: '2.13.0'
+  TRIVY_VERSION: '0.45.1'
+
+jobs:
+  # ZERO-TRUST PRINCIPLE: Verify every component before proceeding
+  verify-pipeline-integrity:
+    name: Verify Pipeline Integrity
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # For OIDC authentication
+      contents: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      - name: Authenticate runner identity
+        id: auth
+        run: |
+          # Verify GitHub Actions runner identity using OIDC
+          echo "::group::Verify runner identity"
+          TOKEN=$(curl -s -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" "$ACTIONS_ID_TOKEN_REQUEST_URL" | jq -r .value)
+          
+          # Store token hash for verification in other jobs
+          HASH=$(echo $TOKEN | sha256sum | cut -d ' ' -f 1)
+          echo "token_hash=$HASH" >> $GITHUB_OUTPUT
+          echo "runner_verified=true" >> $GITHUB_OUTPUT
+          echo "::endgroup::"
+      
+      - name: Verify workflow integrity
+        id: workflow_integrity
+        run: |
+          echo "::group::Verifying workflow integrity"
+          # Calculate hash of the workflow file to detect potential tampering
+          WORKFLOW_HASH=$(sha256sum .github/workflows/zero-trust-deployment.yml | cut -d ' ' -f 1)
+          
+          # Verify that the workflow hasn't been tampered with
+          python scripts/verify_pipeline_integrity.py \
+            --workflow-hash $WORKFLOW_HASH \
+            --runner-id "${{ steps.auth.outputs.token_hash }}" \
+            --log-level debug
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Pipeline integrity verification failed"
+            exit 1
+          fi
+          echo "::endgroup::"
+          
+          echo "integrity_verified=true" >> $GITHUB_OUTPUT
+      
+      - name: Verify deployment authorization
+        id: deployment_auth
+        run: |
+          echo "::group::Verifying deployment authorization"
+          # Get temporary credentials using the secure secrets manager
+          python scripts/secretes_manager.py temp-creds --output .auth-credentials --duration 1800
+          source .auth-credentials
+          
+          # Verify that the deployment is authorized for the target environment
+          python scripts/verify_deployment_authorization.py \
+            --environment ${{ github.event.inputs.environment }} \
+            --deploy-version ${{ github.event.inputs.deploy_version }} \
+            --requested-by ${{ github.actor }}
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Deployment authorization verification failed"
+            exit 1
+          fi
+          echo "::endgroup::"
+          
+          echo "authorized=true" >> $GITHUB_OUTPUT
+    
+    outputs:
+      runner_verified: ${{ steps.auth.outputs.runner_verified }}
+      integrity_verified: ${{ steps.workflow_integrity.outputs.integrity_verified }}
+      authorized: ${{ steps.deployment_auth.outputs.authorized }}
+      token_hash: ${{ steps.auth.outputs.token_hash }}
+
+  # ZERO-TRUST PRINCIPLE: Verify all artifacts cryptographically
+  verify-artifacts:
+    name: Verify Deployment Artifacts
+    needs: verify-pipeline-integrity
+    # Only proceed if previous job successfully verified the pipeline
+    if: needs.verify-pipeline-integrity.outputs.runner_verified == 'true' && needs.verify-pipeline-integrity.outputs.integrity_verified == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+      
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.1.1
+        with:
+          cosign-release: v${{ env.COSIGN_VERSION }}
+      
+      - name: Setup environment-specific credentials
+        id: creds_setup
+        run: |
+          # Get environment-specific credentials using the secure secrets manager
+          if [ "${{ github.event.inputs.environment }}" == "production" ]; then
+            python scripts/secretes_manager.py get --name PROD_VERIFICATION_CREDS --output .verification-credentials
+          else
+            python scripts/secretes_manager.py get --name STAGING_VERIFICATION_CREDS --output .verification-credentials
+          fi
+          
+          source .verification-credentials
+          echo "credentials_loaded=true" >> $GITHUB_OUTPUT
+      
+      - name: Verify artifact signatures
+        id: verify_signatures
+        run: |
+          echo "::group::Verifying artifact signatures"
+          # Download and verify deployment artifacts
+          
+          # Get artifact details
+          ARTIFACTS=$(python scripts/get_deployment_artifacts.py \
+            --version ${{ github.event.inputs.deploy_version }} \
+            --environment ${{ github.event.inputs.environment }} \
+            --output-json artifacts.json)
+          
+          # Create verification results directory
+          mkdir -p ./verification-results
+          
+          # Verify signatures for all artifacts
+          cat artifacts.json | jq -c '.artifacts[]' | while read -r artifact; do
+            NAME=$(echo $artifact | jq -r '.name')
+            URL=$(echo $artifact | jq -r '.url')
+            SIG_URL=$(echo $artifact | jq -r '.signature_url')
+            CERT_URL=$(echo $artifact | jq -r '.certificate_url')
+            
+            echo "Verifying artifact: $NAME"
+            
+            # Download artifact and signature
+            curl -sSL $URL -o ./artifact
+            curl -sSL $SIG_URL -o ./artifact.sig
+            
+            # Verify the signature
+            cosign verify-blob \
+              --key ./verification-key.pem \
+              --signature ./artifact.sig \
+              ./artifact | tee ./verification-results/$NAME.verification
+              
+            # Verify artifact provenance
+            python scripts/verify_artifact_provenance.py \
+              --artifact ./artifact \
+              --name $NAME \
+              --expected-builder "github-actions" \
+              --expected-repository "${{ github.repository }}" \
+              --output ./verification-results/$NAME.provenance.json
+          done
+          
+          # Check if verification files exist and contain successful results
+          VERIFICATION_FAILED=false
+          for file in ./verification-results/*.verification; do
+            if [ -f "$file" ] && ! grep -q "Verified OK" "$file"; then
+              VERIFICATION_FAILED=true
+              echo "❌ Verification failed for $(basename "$file" .verification)"
+            fi
+          done
+          
+          if [ "$VERIFICATION_FAILED" = "true" ]; then
+            echo "❌ Artifact verification failed"
+            exit 1
+          fi
+          echo "::endgroup::"
+          
+          echo "artifacts_verified=true" >> $GITHUB_OUTPUT
+      
+      - name: Verify artifact security scans
+        id: verify_security_scans
+        run: |
+          echo "::group::Verifying artifact security scans"
+          # Initialize verification variables
+          SECURITY_VERIFICATION_PASSED=true
+          
+          # Get scan policies based on environment and verification level
+          POLICY_FILE="security-policies/artifact-${{ github.event.inputs.environment }}-${{ github.event.inputs.verification_level }}.yml"
+          if [ ! -f "$POLICY_FILE" ]; then
+            POLICY_FILE="security-policies/artifact-default.yml"
+          fi
+          
+          # Run security verification on each artifact
+          cat artifacts.json | jq -c '.artifacts[]' | while read -r artifact; do
+            NAME=$(echo $artifact | jq -r '.name')
+            TYPE=$(echo $artifact | jq -r '.type')
+            
+            echo "Verifying security of artifact: $NAME (type: $TYPE)"
+            
+            # Run different verification based on artifact type
+            if [ "$TYPE" = "container" ]; then
+              # Verify container image security
+              python scripts/verify_container_security.py \
+                --image $NAME \
+                --policy $POLICY_FILE \
+                --level ${{ github.event.inputs.verification_level }} \
+                --output ./verification-results/$NAME.security.json
+            elif [ "$TYPE" = "package" ]; then
+              # Verify package security
+              python scripts/verify_package_security.py \
+                --package ./artifact \
+                --name $NAME \
+                --policy $POLICY_FILE \
+                --level ${{ github.event.inputs.verification_level }} \
+                --output ./verification-results/$NAME.security.json
+            else
+              # Default verification for other artifact types
+              python scripts/verify_artifact_security.py \
+                --artifact ./artifact \
+                --name $NAME \
+                --type $TYPE \
+                --policy $POLICY_FILE \
+                --level ${{ github.event.inputs.verification_level }} \
+                --output ./verification-results/$NAME.security.json
+            fi
+            
+            # Check if verification failed
+            if [ $? -ne 0 ]; then
+              SECURITY_VERIFICATION_PASSED=false
+              echo "❌ Security verification failed for $NAME"
+            fi
+          done
+          
+          if [ "$SECURITY_VERIFICATION_PASSED" = "false" ]; then
+            echo "❌ Artifact security verification failed"
+            exit 1
+          fi
+          echo "::endgroup::"
+          
+          echo "security_verified=true" >> $GITHUB_OUTPUT
+      
+      - name: Upload verification results
+        uses: actions/upload-artifact@v3
+        with:
+          name: artifact-verification-results
+          path: ./verification-results/
+          retention-days: 30
+    
+    outputs:
+      artifacts_verified: ${{ steps.verify_signatures.outputs.artifacts_verified }}
+      security_verified: ${{ steps.verify_security_scans.outputs.security_verified }}
+
+  # ZERO-TRUST PRINCIPLE: Verify deployment environment before deploy
+  verify-environment:
+    name: Verify Deployment Environment
+    needs: [verify-pipeline-integrity, verify-artifacts]
+    if: needs.verify-artifacts.outputs.artifacts_verified == 'true' && needs.verify-artifacts.outputs.security_verified == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      - name: Access environment credentials
+        id: creds
+        run: |
+          # Get environment-specific credentials using the secure secrets manager
+          if [ "${{ github.event.inputs.environment }}" == "production" ]; then
+            python scripts/secretes_manager.py get --name PROD_ENV_CREDS --output .env-credentials
+          else
+            python scripts/secretes_manager.py get --name STAGING_ENV_CREDS --output .env-credentials
+          fi
+          
+          source .env-credentials
+          echo "credentials_loaded=true" >> $GITHUB_OUTPUT
+      
+      - name: Verify environment integrity
+        id: env_integrity
+        run: |
+          echo "::group::Verifying environment integrity"
+          # Run environment integrity checks
+          python scripts/verify_environment_integrity.py \
+            --environment ${{ github.event.inputs.environment }} \
+            --check-resources true \
+            --verify-configurations true \
+            --output ./environment-verification.json
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Environment integrity verification failed"
+            exit 1
+          fi
+          echo "::endgroup::"
+          
+          echo "environment_verified=true" >> $GITHUB_OUTPUT
+      
+      - name: Verify security posture
+        id: security_posture
+        run: |
+          echo "::group::Verifying environment security posture"
+          # Run security posture assessment
+          python scripts/verify_security_posture.py \
+            --environment ${{ github.event.inputs.environment }} \
+            --level ${{ github.event.inputs.verification_level }} \
+            --output ./security-posture.json
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Security posture verification failed"
+            exit 1
+          fi
+          echo "::endgroup::"
+          
+          echo "posture_verified=true" >> $GITHUB_OUTPUT
+      
+      - name: Verify environment access controls
+        id: access_controls
+        run: |
+          echo "::group::Verifying environment access controls"
+          # Verify network policies and access controls
+          python scripts/verify_access_controls.py \
+            --environment ${{ github.event.inputs.environment }} \
+            --policy-file ./security-policies/access-control-policy.yml \
+            --output ./access-control-verification.json
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Access control verification failed"
+            exit 1
+          fi
+          echo "::endgroup::"
+          
+          echo "access_verified=true" >> $GITHUB_OUTPUT
+      
+      - name: Upload environment verification results
+        uses: actions/upload-artifact@v3
+        with:
+          name: environment-verification-results
+          path: |
+            ./environment-verification.json
+            ./security-posture.json
+            ./access-control-verification.json
+          retention-days: 30
+    
+    outputs:
+      environment_verified: ${{ steps.env_integrity.outputs.environment_verified }}
+      posture_verified: ${{ steps.security_posture.outputs.posture_verified }}
+      access_verified: ${{ steps.access_controls.outputs.access_verified }}
+
+  # ZERO-TRUST PRINCIPLE: Create attestations before deployment
+  create-deployment-attestations:
+    name: Create Deployment Attestations
+    needs: [verify-pipeline-integrity, verify-artifacts, verify-environment]
+    if: |
+      needs.verify-environment.outputs.environment_verified == 'true' && 
+      needs.verify-environment.outputs.posture_verified == 'true' && 
+      needs.verify-environment.outputs.access_verified == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.1.1
+        with:
+          cosign-release: v${{ env.COSIGN_VERSION }}
+      
+      - name: Access attestation credentials
+        run: |
+          # Get attestation-specific credentials using the secure secrets manager
+          python scripts/secretes_manager.py get --name ATTESTATION_CREDENTIALS --output .attestation-credentials
+          source .attestation-credentials
+      
+      - name: Create deployment attestations
+        id: attestations
+        run: |
+          echo "::group::Creating deployment attestations"
+          # Create directory for attestations
+          mkdir -p ./attestations
+          
+          # Create attestation with deployment metadata
+          cat > ./attestations/deployment-metadata.json << EOF
+          {
+            "deployer": "${{ github.actor }}",
+            "repository": "${{ github.repository }}",
+            "workflow": "${{ github.workflow }}",
+            "environment": "${{ github.event.inputs.environment }}",
+            "version": "${{ github.event.inputs.deploy_version }}",
+            "timestamp": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+            "runner_id": "${{ needs.verify-pipeline-integrity.outputs.token_hash }}",
+            "verifications": {
+              "pipeline_integrity": true,
+              "artifacts_verified": true,
+              "environment_verified": true,
+              "security_posture_verified": true,
+              "access_controls_verified": true
+            },
+            "verification_level": "${{ github.event.inputs.verification_level }}"
+          }
+          EOF
+          
+          # Sign the attestation
+          cosign sign-blob --key ./attestation-key.pem ./attestations/deployment-metadata.json > ./attestations/deployment-metadata.json.sig
+          
+          # Create Software Bill of Materials (SBOM) attestation
+          python scripts/generate_deployment_sbom.py \
+            --version ${{ github.event.inputs.deploy_version }} \
+            --environment ${{ github.event.inputs.environment }} \
+            --output ./attestations/deployment-sbom.json
+          
+          # Sign the SBOM
+          cosign sign-blob --key ./attestation-key.pem ./attestations/deployment-sbom.json > ./attestations/deployment-sbom.json.sig
+          
+          # Create security verification attestation
+          python scripts/generate_security_attestation.py \
+            --version ${{ github.event.inputs.deploy_version }} \
+            --environment ${{ github.event.inputs.environment }} \
+            --verification-level ${{ github.event.inputs.verification_level }} \
+            --output ./attestations/security-verification.json
+          
+          # Sign the security verification
+          cosign sign-blob --key ./attestation-key.pem ./attestations/security-verification.json > ./attestations/security-verification.json.sig
+          echo "::endgroup::"
+          
+          echo "attestations_created=true" >> $GITHUB_OUTPUT
+      
+      - name: Upload attestations to secure storage
+        id: upload_attestations
+        run: |
+          echo "::group::Uploading attestations"
+          # Upload attestations to secure storage
+          python scripts/upload_attestations.py \
+            --attestation-dir ./attestations \
+            --environment ${{ github.event.inputs.environment }} \
+            --deploy-id "$(date -u +"%Y%m%d%H%M%S")-${{ github.run_id }}"
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Failed to upload attestations"
+            exit 1
+          fi
+          echo "::endgroup::"
+          
+          echo "attestations_uploaded=true" >> $GITHUB_OUTPUT
+      
+      - name: Upload attestation artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: deployment-attestations
+          path: ./attestations/
+          retention-days: 90
+    
+    outputs:
+      attestations_created: ${{ steps.attestations.outputs.attestations_created }}
+      attestations_uploaded: ${{ steps.upload_attestations.outputs.attestations_uploaded }}
+
+  # ZERO-TRUST PRINCIPLE: Precise access controls during deployment
+  provision-least-privilege-credentials:
+    name: Provision Least-Privilege Credentials
+    needs: [verify-pipeline-integrity, verify-artifacts, verify-environment, create-deployment-attestations]
+    if: needs.create-deployment-attestations.outputs.attestations_created == 'true' && needs.create-deployment-attestations.outputs.attestations_uploaded == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Generate ephemeral deployment credentials
+        id: deployment_creds
+        run: |
+          echo "::group::Generating deployment credentials"
+          # Generate ephemeral credentials with least privilege for deployment
+          python scripts/secretes_manager.py temp-creds \
+            --purpose deployment \
+            --environment ${{ github.event.inputs.environment }} \
+            --duration 1800 \
+            --requester ${{ github.actor }} \
+            --output .deployment-credentials
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Failed to generate deployment credentials"
+            exit 1
+          fi
+          
+          # Source the credentials but don't print them
+          source .deployment-credentials
+          echo "::endgroup::"
+          
+          echo "credentials_generated=true" >> $GITHUB_OUTPUT
+      
+      - name: Generate access policy
+        id: access_policy
+        run: |
+          echo "::group::Generating access policy"
+          # Generate a restrictive access policy for deployment
+          python scripts/generate_deployment_policy.py \
+            --environment ${{ github.event.inputs.environment }} \
+            --version ${{ github.event.inputs.deploy_version }} \
+            --output ./deployment-policy.json
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Failed to generate deployment policy"
+            exit 1
+          fi
+          echo "::endgroup::"
+          
+          echo "policy_generated=true" >> $GITHUB_OUTPUT
+      
+      - name: Apply temporary access policy
+        id: apply_policy
+        run: |
+          echo "::group::Applying access policy"
+          # Apply the restrictive policy for this deployment
+          python scripts/apply_deployment_policy.py \
+            --policy ./deployment-policy.json \
+            --environment ${{ github.event.inputs.environment }} \
+            --duration 1800
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Failed to apply deployment policy"
+            exit 1
+          fi
+          echo "::endgroup::"
+          
+          echo "policy_applied=true" >> $GITHUB_OUTPUT
+    
+    outputs:
+      credentials_generated: ${{ steps.deployment_creds.outputs.credentials_generated }}
+      policy_generated: ${{ steps.access_policy.outputs.policy_generated }}
+      policy_applied: ${{ steps.apply_policy.outputs.policy_applied }}
+
+  # ZERO-TRUST PRINCIPLE: Controlled deployment with continuous verification
+  deploy-with-verification:
+    name: Deploy with Continuous Verification
+    needs: [verify-pipeline-integrity, verify-artifacts, verify-environment, create-deployment-attestations, provision-least-privilege-credentials]
+    if: |
+      needs.provision-least-privilege-credentials.outputs.credentials_generated == 'true' && 
+      needs.provision-least-privilege-credentials.outputs.policy_applied == 'true'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Access deployment credentials
+        run: |
+          # Get the ephemeral deployment credentials
+          python scripts/secretes_manager.py get \
+            --name DEPLOYMENT_CREDENTIALS_${{ github.run_id }} \
+            --output .deployment-credentials
+          
+          source .deployment-credentials
+      
+      - name: Pre-deployment verification
+        id: pre_deploy
+        run: |
+          # Verify environment-specific prerequisites right before deployment
+          python scripts/verify_deployment_prerequisites.py \
+            --environment ${{ github.event.inputs.environment }} \
+            --version ${{ github.event.inputs.deploy_version }}
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Pre-deployment verification failed"
+            exit 1
+          fi
+          
+          echo "pre_deploy_verified=true" >> $GITHUB_OUTPUT
+      
+      - name: Deploy with verification
+        id: deploy
+        run: |
+          echo "::group::Deploying with continuous verification"
+          # Perform deployment with continuous verification
+          python scripts/deploy_with_verification.py \
+            --environment ${{ github.event.inputs.environment }} \
+            --version ${{ github.event.inputs.deploy_version }} \
+            --verification-level ${{ github.event.inputs.verification_level }} \
+            --attestation-id "$(date -u +"%Y%m%d%H%M%S")-${{ github.run_id }}" \
+            --report-file ./deployment-report.json
+          
+          DEPLOY_STATUS=$?
+          if [ $DEPLOY_STATUS -ne 0 ]; then
+            echo "❌ Deployment failed with verification errors"
+            exit 1
+          fi
+          echo "::endgroup::"
+          
+          echo "deployment_successful=true" >> $GITHUB_OUTPUT
+      
+      - name: Record deployment results
+        run: |
+          # Record deployment results for audit trail
+          python scripts/record_deployment_result.py \
+            --environment ${{ github.event.inputs.environment }} \
+            --version ${{ github.event.inputs.deploy_version }} \
+            --status "success" \
+            --run-id ${{ github.run_id }} \
+            --actor ${{ github.actor }} \
+            --report-file ./deployment-report.json
+      
+      - name: Clean up temporary credentials
+        if: always()
+        run: |
+          # Clean up ephemeral credentials regardless of deployment outcome
+          python scripts/secretes_manager.py delete \
+            --name DEPLOYMENT_CREDENTIALS_${{ github.run_id }}
+      
+      - name: Upload deployment report
+        uses: actions/upload-artifact@v3
+        with:
+          name: deployment-report
+          path: ./deployment-report.json
+          retention-days: 90
+
+  # ZERO-TRUST PRINCIPLE: Post-deployment verification
+  post-deployment-verification:
+    name: Post-Deployment Verification
+    needs: [deploy-with-verification]
+    if: needs.deploy-with-verification.outputs.deployment_successful == 'true'
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+          
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: Access verification credentials
+        run: |
+          # Get verification credentials
+          python scripts/secretes_manager.py get \
+            --name POST_DEPLOY_VERIFY_CREDS \
+            --output .verify-credentials
+          
+          source .verify-credentials
+      
+      - name: Verify deployment integrity
+        id: integrity
+        run: |
+          echo "::group::Verifying deployment integrity"
+          # Verify the integrity of the deployed artifacts
+          python scripts/verify_deployment_integrity.py \
+            --environment ${{ github.event.inputs.environment }} \
+            --version ${{ github.event.inputs.deploy_version }} \
+            --output ./post-deploy-integrity.json
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Post-deployment integrity verification failed"
+            exit 1
+          fi
+          echo "::endgroup::"
+          
+          echo "integrity_verified=true" >> $GITHUB_OUTPUT
+      
+      - name: Perform security scan
+        id: security_scan
+        run: |
+          echo "::group::Performing post-deployment security scan"
+          # Run DAST security scan on deployed artifacts
+          python scripts/post_deployment_security_scan.py \
+            --environment ${{ github.event.inputs.environment }} \
+            --version ${{ github.event.inputs.deploy_version }} \
+            --scan-type dast \
+            --output ./post-deploy-security.json
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Post-deployment security scan failed"
+            exit 1
+          fi
+          echo "::endgroup::"
+          
+          echo "security_verified=true" >> $GITHUB_OUTPUT
+      
+      - name: Verify runtime behavior
+        id: runtime
+        run: |
+          echo "::group::Verifying runtime behavior"
+          # Verify runtime behavior of deployed application
+          python scripts/verify_runtime_behavior.py \
+            --environment ${{ github.event.inputs.environment }} \
+            --version ${{ github.event.inputs.deploy_version }} \
+            --output ./runtime-verification.json
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Runtime verification failed"
+            exit 1
+          fi
+          echo "::endgroup::"
+          
+          echo "runtime_verified=true" >> $GITHUB_OUTPUT
+      
+      - name: Upload verification results
+        uses: actions/upload-artifact@v3
+        with:
+          name: post-deployment-verification
+          path: |
+            ./post-deploy-integrity.json
+            ./post-deploy-security.json
+            ./runtime-verification.json
+          retention-days: 30
+      
+      - name: Send verification report
+        run: |
+          # Notify stakeholders of deployment verification results
+          python scripts/security_notification.py \
+            --event-type "zero-trust-deployment-complete" \
+            --environment ${{ github.event.inputs.environment }} \
+            --status "success" \
+            --report-paths "./post-deploy-integrity.json,./post-deploy-security.json,./runtime-verification.json" \
+            --notify security-team devops-team management 
